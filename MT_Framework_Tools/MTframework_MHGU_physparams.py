@@ -1,0 +1,597 @@
+# -*- coding: utf-8 -*-
+"""物理参数编辑：直接改当前 CTC 里的重力/阻尼/弹簧/角度等。
+
+CTC 布局（参考包 CTC编写指南 + 实测）：
+  头 0x3C：0x1C 步长、0x20 重力缩放、0x24 全局阻尼、0x28 平移力系数、0x2C 弹簧缩放、0x30 风缩放
+  组块 80B：+0 nodeNum、+32 重力 xyz、+48 阻尼、+52 平移力、+56 弹簧、+60 风、
+            +64 限力、+68 摩擦、+72 反射
+  链块 96B：+0 jointNo、+4 mRotMode、+8 mR、+80 角度上限、+84 质量、+88 弹性
+"""
+from __future__ import annotations
+
+import os
+import struct
+
+try:
+    import bpy
+    from bpy.props import EnumProperty, FloatProperty, IntProperty
+    from bpy.types import Operator
+except Exception:                                       # noqa: BLE001
+    bpy = None
+
+from .MTframework_MHGU_phys import recalled_arc, remember_arc
+
+HDR = 0x3C
+GROUP_SZ = 80
+CHAIN_SZ = 96
+
+
+def parse_ctc(ctc):
+    ng = struct.unpack_from('<I', ctc, 0x10)[0]
+    nc = struct.unpack_from('<I', ctc, 0x14)[0]
+    g_off = HDR
+    n_off = HDR + GROUP_SZ * ng
+    return dict(ng=ng, nc=nc, g_off=g_off, n_off=n_off, raw=ctc)
+
+
+def read_params(ctc):
+    p = parse_ctc(ctc)
+    g = p['g_off']
+    groups = []
+    for i in range(p['ng']):
+        o = g + i * GROUP_SZ
+        groups.append(dict(
+            node_num=struct.unpack_from('<I', ctc, o)[0],
+            gravity=struct.unpack_from('<3f', ctc, o + 32),
+            damping=struct.unpack_from('<f', ctc, o + 48)[0],
+            trans_force=struct.unpack_from('<f', ctc, o + 52)[0],
+            spring=struct.unpack_from('<f', ctc, o + 56)[0],
+            wind=struct.unpack_from('<f', ctc, o + 60)[0],
+            limit_force=struct.unpack_from('<f', ctc, o + 64)[0],
+            friction=struct.unpack_from('<f', ctc, o + 68)[0],
+            reflect=struct.unpack_from('<f', ctc, o + 72)[0],
+        ))
+    chains = []
+    for k in range(p['nc']):
+        o = p['n_off'] + k * CHAIN_SZ
+        chains.append(dict(
+            joint=ctc[o], rot_mode=ctc[o + 4],
+            radius=struct.unpack_from('<f', ctc, o + 8)[0],
+            angle=struct.unpack_from('<f', ctc, o + 80)[0],
+            mass=struct.unpack_from('<f', ctc, o + 84)[0],
+            elastic=struct.unpack_from('<f', ctc, o + 88)[0],
+        ))
+    head = dict(
+        timestep=struct.unpack_from('<f', ctc, 0x1C)[0],
+        gravity_scaling=struct.unpack_from('<f', ctc, 0x20)[0],
+        global_damping=struct.unpack_from('<f', ctc, 0x24)[0],
+        trans_coef=struct.unpack_from('<f', ctc, 0x28)[0],
+        spring_scaling=struct.unpack_from('<f', ctc, 0x2C)[0],
+        wind_scaling=struct.unpack_from('<f', ctc, 0x30)[0],
+    )
+    return head, groups, chains
+
+
+def write_params(ctc, gravity=None, damping=None, spring=None, wind=None,
+                 trans_force=None, limit_force=None, reflect=None, friction=None,
+                 angle_limit=None, mass=None, elastic=None):
+    """把所有组/链的对应字段改成给定值（None 表示不动）。返回新字节。"""
+    p = parse_ctc(ctc)
+    b = bytearray(ctc)
+    for i in range(p['ng']):
+        o = p['g_off'] + i * GROUP_SZ
+        if gravity is not None:
+            struct.pack_into('<3f', b, o + 32, 0.0, float(gravity), 0.0)
+        for off, val in ((48, damping), (52, trans_force), (56, spring),
+                         (60, wind), (64, limit_force), (68, friction), (72, reflect)):
+            if val is not None:
+                struct.pack_into('<f', b, o + off, float(val))
+    for k in range(p['nc']):
+        o = p['n_off'] + k * CHAIN_SZ
+        if angle_limit is not None:
+            struct.pack_into('<f', b, o + 80, float(angle_limit))
+        if mass is not None:
+            struct.pack_into('<f', b, o + 84, float(mass))
+        if elastic is not None:
+            struct.pack_into('<f', b, o + 88, float(elastic))
+    return bytes(b)
+
+
+
+# ---------------------------------------------------------------- 预设
+#: 名字 -> (重力Y, 阻尼, 弹簧, 风, 平移力, 限力, 反射, 角度上限, 质量, 弹性)
+PHYS_PRESETS = {
+    'hair_soft':   ("丝绸·软",   -600.0, 0.12, 0.020, 0.80, 0.8, 100.0, 0.10, 1.75, 1.0, 1.0),
+    'hair_wave':   ("长绸·波浪",    -900.0, 0.20, 0.015, 0.60, 0.7, 100.0, 0.12, 1.60, 1.2, 1.0),
+    'cloth_std':   ("棉布·标准",    -850.0, 0.18, 0.015, 1.00, 0.8, 100.0, 0.10, 1.57, 1.0, 1.0),
+    'ribbon':      ("丝带·轻飘",   -400.0, 0.10, 0.030, 1.20, 0.9, 100.0, 0.10, 2.00, 0.8, 1.0),
+    'cape_heavy':  ("帆布·厚重",   -2000.0, 0.35, 0.010, 0.30, 0.6, 120.0, 0.08, 1.20, 2.0, 1.0),
+    'armor_stiff': ("铁片·硬挺",   -3500.0, 0.50, 0.005, 0.10, 0.4, 150.0, 0.05, 0.60, 3.0, 1.0),
+    # 贴身软组织（胸/腹/臀/肌肉块）：**重力必须 0**，否则静止姿态被重力矩拉偏（塌陷）。
+    # 数值来自第三方 1107 包「单条两链胸部」（f/018 实测，用户验收「完美了」）：
+    # 竖直 2 节链、整块只绑链首、gravity 0 / damp 0.85 / trans 0.35 / spring 0.15 /
+    # angle 0.30 / mass 2.0。适合「不会自己垂下来」的贴身块，不适合头发裙摆。
+    'soft_body':   ("贴身·软组织",   0.0, 0.85, 0.150, 0.10, 0.35, 100.0, 0.05, 0.30, 2.0, 1.0),
+    # 贴身·更软 / 贴身·最软：**重力保持 0**（不会垂、不会陷进身体），
+    # 只把阻尼/弹簧调小、角度上限放大 → 原地晃得更软。
+    'soft_jiggle': ("贴身·更软",     0.0, 0.250, 0.050, 0.15, 0.50, 100.0, 0.05, 0.90, 1.0, 1.0),
+    'soft_jiggle_max': ("贴身·最软", 0.0, 0.100, 0.020, 0.10, 0.60, 100.0, 0.05, 1.40, 0.6, 1.0),
+    # 刚性·跟随：**完全没有物理摆动**，只作为父骨的刚性延伸。
+    # 关键 = 角度上限 0（不允许相对静止姿态旋转）+ 重力/风/平移力 0 + 阻尼拉满。
+    # 适合"头发/挂件不想动，只想跟着头/身体走"。
+    'rigid':       ("刚性·跟随（无物理）", 0.0, 1.00, 1.00, 0.00, 0.00, 100.0, 0.05, 0.00, 1.0, 1.0),
+}
+
+
+def apply_preset(ctc, key):
+    """把预设写进 CTC 的所有组/链。"""
+    row = PHYS_PRESETS.get(key)
+    if row is None:
+        raise ValueError("没有这个预设: %s" % key)
+    _name, grav, damp, spring, wind, trans, limit, reflect, angle, mass, elastic = row
+    return write_params(ctc, gravity=grav, damping=damp, spring=spring, wind=wind,
+                        trans_force=trans, limit_force=limit, reflect=reflect,
+                        angle_limit=angle, mass=mass, elastic=elastic)
+
+
+def node_group_map(ctc):
+    """返回 (node_group, group_nodes)：节点下标→组下标 / 组下标→节点下标列表。"""
+    p = parse_ctc(ctc)
+    node_group, group_nodes = {}, {}
+    idx = 0
+    for gi in range(p['ng']):
+        cnt = struct.unpack_from('<I', ctc, p['g_off'] + gi * GROUP_SZ)[0]
+        group_nodes[gi] = list(range(idx, idx + cnt))
+        for k in range(idx, idx + cnt):
+            node_group[k] = gi
+        idx += cnt
+    return node_group, group_nodes
+
+
+def apply_preset_selected(ctc, key, selected_ids):
+    """只给「选中骨」套预设。
+
+    * 组参数（重力/阻尼/平移/弹簧/风/限力/反射）→ 选中骨**所在的组**
+      （同一组的其它链会一起变，官方一个组就是一套环境参数）
+    * 节点参数（角度上限/质量/弹性）→ **只改选中的那些节点**
+
+    返回 ``(新 CTC, 改动的组数, 改动的节点数)``。
+    """
+    row = PHYS_PRESETS.get(key)
+    if row is None:
+        raise ValueError("没有这个预设: %s" % key)
+    _name, grav, damp, spring, wind, trans, limit, reflect, angle, mass, elastic = row
+    p = parse_ctc(ctc)
+    node_group, group_nodes = node_group_map(ctc)
+    sel = set(int(i) for i in selected_ids)
+    hit_nodes = [k for k in range(p['nc'])
+                 if ctc[p['n_off'] + k * CHAIN_SZ] in sel]
+    hit_groups = sorted({node_group[k] for k in hit_nodes})
+    b = bytearray(ctc)
+    for gi in hit_groups:
+        o = p['g_off'] + gi * GROUP_SZ
+        struct.pack_into('<3f', b, o + 32, 0.0, float(grav), 0.0)
+        struct.pack_into('<f', b, o + 48, float(damp))
+        struct.pack_into('<f', b, o + 52, float(trans))
+        struct.pack_into('<f', b, o + 56, float(spring))
+        struct.pack_into('<f', b, o + 60, float(wind))
+        struct.pack_into('<f', b, o + 64, float(limit))
+        struct.pack_into('<f', b, o + 72, float(reflect))
+    for k in hit_nodes:
+        o = p['n_off'] + k * CHAIN_SZ
+        struct.pack_into('<f', b, o + 80, float(angle))
+        struct.pack_into('<f', b, o + 84, float(mass))
+        struct.pack_into('<f', b, o + 88, float(elastic))
+    return bytes(b), len(hit_groups), len(hit_nodes)
+
+
+def lock_nodes(ctc, selected_ids):
+    """只把选中节点的「角度上限」设为 0（锁死），**不动组参数**。
+
+    适合只锁链尾：前面的骨继续有物理摆动，尾段作为刚性延伸被父骨带着走。
+    返回 ``(新 CTC, 改动的节点数)``。
+    """
+    p = parse_ctc(ctc)
+    sel = set(int(i) for i in selected_ids)
+    b = bytearray(ctc)
+    hit = 0
+    for k in range(p['nc']):
+        o = p['n_off'] + k * CHAIN_SZ
+        if ctc[o] in sel:
+            struct.pack_into('<f', b, o + 80, 0.0)
+            hit += 1
+    return bytes(b), hit
+
+
+def write_params_selected(ctc, selected_ids, gravity, damping, spring, wind,
+                          trans_force, limit_force, reflect,
+                          angle_limit, mass, elastic):
+    """把面板上的参数**只写进选中骨**。
+
+    * 组参数（重力/阻尼/平移/弹簧/风/限力/反射）→ 选中骨**所在的组**
+      （同一组是共享环境参数，同组的其它链会一起变）
+    * 节点参数（角度上限/质量/弹性）→ **只改选中的那些节点**
+
+    返回 ``(新 CTC, 改动的组数, 改动的节点数)``。
+    """
+    p = parse_ctc(ctc)
+    node_group, group_nodes = node_group_map(ctc)
+    sel = set(int(i) for i in selected_ids)
+    hit_nodes = [k for k in range(p['nc'])
+                 if ctc[p['n_off'] + k * CHAIN_SZ] in sel]
+    hit_groups = sorted({node_group[k] for k in hit_nodes})
+    b = bytearray(ctc)
+    for gi in hit_groups:
+        o = p['g_off'] + gi * GROUP_SZ
+        struct.pack_into('<3f', b, o + 32, 0.0, float(gravity), 0.0)
+        struct.pack_into('<f', b, o + 48, float(damping))
+        struct.pack_into('<f', b, o + 52, float(trans_force))
+        struct.pack_into('<f', b, o + 56, float(spring))
+        struct.pack_into('<f', b, o + 60, float(wind))
+        struct.pack_into('<f', b, o + 64, float(limit_force))
+        struct.pack_into('<f', b, o + 72, float(reflect))
+    for k in hit_nodes:
+        o = p['n_off'] + k * CHAIN_SZ
+        struct.pack_into('<f', b, o + 80, float(angle_limit))
+        struct.pack_into('<f', b, o + 84, float(mass))
+        struct.pack_into('<f', b, o + 88, float(elastic))
+    return bytes(b), len(hit_groups), len(hit_nodes)
+
+
+if bpy is not None:
+
+    def _register_props():
+        S = bpy.types.Scene
+        S.MT_PhysGravity = FloatProperty(name="重力 Y", default=-850.0,
+                                         description="负数向下，越大越沉（手感主旋钮）")
+        S.MT_PhysDamping = FloatProperty(name="阻尼", default=0.18, min=0.0, max=10.0)
+        S.MT_PhysSpring = FloatProperty(name="弹簧", default=0.015, min=0.0, max=10.0)
+        S.MT_PhysWind = FloatProperty(name="风", default=1.0, min=0.0, max=10.0)
+        S.MT_PhysTrans = FloatProperty(name="平移力系数", default=0.8, min=0.0, max=10.0)
+        S.MT_PhysLimit = FloatProperty(name="限力", default=100.0, min=0.0, max=10000.0)
+        S.MT_PhysReflect = FloatProperty(name="反射", default=0.1, min=0.0, max=10.0)
+        S.MT_PhysAngle = FloatProperty(name="角度上限", default=1.57, min=0.0, max=3.15)
+        S.MT_PhysMass = FloatProperty(name="质量", default=1.0, min=0.0, max=100.0)
+        S.MT_PhysElastic = FloatProperty(name="弹性", default=1.0, min=0.0, max=10.0)
+        S.MT_PhysPreset = EnumProperty(
+            name="物理预设",
+            items=[(k, v[0], '') for k, v in PHYS_PRESETS.items()],
+            default='cloth_std')
+    def _unregister_props():
+        for k in ('MT_PhysGravity', 'MT_PhysDamping', 'MT_PhysSpring', 'MT_PhysWind',
+                  'MT_PhysTrans', 'MT_PhysLimit', 'MT_PhysReflect', 'MT_PhysAngle',
+                  'MT_PhysMass', 'MT_PhysElastic'):
+            try:
+                delattr(bpy.types.Scene, k)
+            except Exception:                           # noqa: BLE001
+                pass
+
+    class MT_OT_PhysRead(Operator):
+        """读取当前 CTC 的物理参数"""
+        bl_idname = "mt_framework.phys_params_read"
+        bl_label = "读取物理参数"
+        bl_description = "读取当前 CTC 里的参数：有选中物理骨就读它所在的组/链，否则读第一组"
+
+        def execute(self, context):
+            _arc, ctc = recalled_arc(context)
+            if not ctc or ctc[:4] != b'CTC\x00':
+                self.report({'ERROR'}, '当前没有 CTC（先登记物理骨或补全物理链）')
+                return {'CANCELLED'}
+            head, groups, chains = read_params(ctc)
+            sc = context.scene
+            # ★ 优先读**选中骨**所在组/链：套用预设（选中骨）只改了一部分组，
+            #   以前这里固定读第 0 组，看起来就像“参数没变”。
+            gi = ci = None
+            arm = _pick_armature(context) if '_pick_armature' in globals() else None
+            ids = set()
+            if arm is not None:
+                try:
+                    ids = _selected_phys_ids(context, arm, ctc)
+                except Exception:                       # noqa: BLE001
+                    ids = set()
+            if ids:
+                try:
+                    p = parse_ctc(ctc)
+                    id2idx = {}
+                    for k in range(p['nc']):
+                        jid = struct.unpack_from('<H', ctc, p['n_off'] + k * 96)[0]
+                        id2idx.setdefault(jid, []).append(k)
+                    node_group, _gn = node_group_map(ctc)
+                    for jid in ids:
+                        for k in id2idx.get(jid, []):
+                            g = node_group.get(k)
+                            if g is not None:
+                                gi, ci = g, k
+                                break
+                        if gi is not None:
+                            break
+                except Exception:                       # noqa: BLE001
+                    gi = ci = None
+            if groups:
+                g = groups[gi if gi is not None else 0]
+                sc.MT_PhysGravity = g['gravity'][1]
+                sc.MT_PhysDamping = g['damping']
+                sc.MT_PhysSpring = g['spring']
+                sc.MT_PhysWind = g['wind']
+                sc.MT_PhysTrans = g['trans_force']
+                sc.MT_PhysLimit = g['limit_force']
+                sc.MT_PhysReflect = g['reflect']
+            if chains:
+                c = chains[ci if ci is not None else 0]
+                sc.MT_PhysAngle = c['angle']
+                sc.MT_PhysMass = c['mass']
+                sc.MT_PhysElastic = c['elastic']
+            self.report({'INFO'},
+                        '已读取：%d 组 / %d 链（显示%s）'
+                        % (head['ng'] if 'ng' in head else len(groups), len(chains),
+                           ('选中骨所在组 %d' % gi) if gi is not None else '第一组'))
+            return {'FINISHED'}
+
+    class MT_OT_PhysWrite(Operator):
+        """把面板参数写回当前 CTC"""
+        bl_idname = "mt_framework.phys_params_write"
+        bl_label = "应用物理参数"
+        bl_description = "把所有组/链的对应字段改成面板上的值（导出时写入 arc）"
+
+        def execute(self, context):
+            arc_path, ctc = recalled_arc(context)
+            if not ctc or ctc[:4] != b'CTC\x00':
+                self.report({'ERROR'}, '当前没有 CTC（先登记物理骨或补全物理链）')
+                return {'CANCELLED'}
+            sc = context.scene
+            new = write_params(
+                ctc,
+                gravity=sc.MT_PhysGravity, damping=sc.MT_PhysDamping,
+                spring=sc.MT_PhysSpring, wind=sc.MT_PhysWind,
+                trans_force=sc.MT_PhysTrans, limit_force=sc.MT_PhysLimit,
+                reflect=sc.MT_PhysReflect,
+                angle_limit=sc.MT_PhysAngle, mass=sc.MT_PhysMass,
+                elastic=sc.MT_PhysElastic)
+            remember_arc(context, arc_path, new)
+            self.report({'INFO'}, '已应用：重力 %.0f / 阻尼 %.2f / 弹簧 %.3f / 角度 %.2f'
+                        % (sc.MT_PhysGravity, sc.MT_PhysDamping, sc.MT_PhysSpring,
+                           sc.MT_PhysAngle))
+            return {'FINISHED'}
+
+
+    def _selected_phys_ids(context, arm, ctc):
+        """选中的骨 → CTC 节点 joint id 集合（优先 id 表，其次用模板 LUT 反查）。
+
+        编辑模式下 `data.bones[].select` 不反映当前选择，必须读 `edit_bones`。
+        """
+        try:
+            if bpy.context.mode == 'EDIT_ARMATURE':
+                sel = {e.name for e in arm.data.edit_bones if e.select}
+            elif bpy.context.mode == 'POSE':
+                sel = {pb.name for pb in arm.pose.bones if pb.bone.select}
+            else:
+                sel = {b.name for b in arm.data.bones if b.select}
+        except Exception:                               # noqa: BLE001
+            sel = {b.name for b in arm.data.bones if b.select}
+        if not sel:
+            return set()
+
+        def resolve(nm, slot, nid):
+            """导入时的对称命名会变成 b_N.l / b_N.r，这里把候选名都试一遍。"""
+            cands = []
+            if nm:
+                cands.append(nm)
+            for base in (slot + 1 if slot is not None else None, nid):
+                if base is None:
+                    continue
+                cands += ['b_%d' % base, 'b_%d.l' % base, 'b_%d.r' % base]
+            for c in cands:
+                if c and arm.data.bones.get(c) is not None:
+                    return c
+            return None
+
+        id2name = {}
+        try:
+            mp = arm.get('MT_PhysIdMap') or {}
+            id2name = {int(k): str(v) for k, v in mp.items()}
+        except Exception:                               # noqa: BLE001
+            pass
+        tpl = context.scene.get('MT_LastImportPath', '') or ''
+        try:
+            if tpl and os.path.exists(tpl):
+                mod = open(tpl, 'rb').read()
+                if mod[:4] == b'MOD\x00':
+                    n = struct.unpack_from('<H', mod, 6)[0]
+                    ptr = struct.unpack_from('<I', mod, 0x24)[0]
+                    lut = ptr + n * 24 + n * 64 + n * 64
+                    for nid in range(256):
+                        if lut + nid >= len(mod):
+                            break
+                        slot = mod[lut + nid]
+                        if slot == 0xFF or slot >= n:
+                            continue
+                        nm = resolve(id2name.get(nid), slot, nid)
+                        if nm is not None:
+                            id2name[nid] = nm
+        except Exception:                               # noqa: BLE001
+            pass
+        # id 表里的名字也可能因为对称命名对不上，再兜一轮
+        for nid in list(id2name):
+            if arm.data.bones.get(id2name[nid]) is None:
+                nm = resolve(id2name[nid], None, nid)
+                if nm is not None:
+                    id2name[nid] = nm
+        return {nid for nid, nm in id2name.items()
+                if nm in sel and arm.data.bones.get(nm) is not None}
+
+    class MT_OT_PhysPresetApply(Operator):
+        """一键套用物理预设"""
+        bl_idname = "mt_framework.phys_preset_apply"
+        bl_label = "套用物理预设"
+        bl_description = "把当前 CTC 的所有组/链改成选中的预设参数"
+
+        def execute(self, context):
+            arc_path, ctc = recalled_arc(context)
+            if not ctc or ctc[:4] != b'CTC\x00':
+                self.report({'ERROR'}, '当前没有 CTC')
+                return {'CANCELLED'}
+            key = context.scene.MT_PhysPreset
+            try:
+                new = apply_preset(ctc, key)
+            except Exception as e:                      # noqa: BLE001
+                self.report({'ERROR'}, str(e))
+                return {'CANCELLED'}
+            remember_arc(context, arc_path, new)
+            self.report({'INFO'}, '已套用预设：%s' % PHYS_PRESETS[key][0])
+            return {'FINISHED'}
+
+    def _pick_armature(context):
+        """正在编辑/摆姿势的那副骨架优先，否则优先 MT_Armature。
+
+        一个 .blend 里可能同时有 MMD 骨架和 MT_Armature，不能随便取第一副。
+        """
+        act = context.view_layer.objects.active
+        try:
+            if (act is not None and act.type == 'ARMATURE'
+                    and context.mode in ('EDIT_ARMATURE', 'POSE')):
+                return act
+        except Exception:                               # noqa: BLE001
+            pass
+        arms = [o for o in context.scene.objects if o.type == 'ARMATURE']
+        for o in arms:
+            if o.name.startswith('MT_Armature') or o.data.name.startswith('MT_Armature'):
+                return o
+        if act is not None and act.type == 'ARMATURE':
+            return act
+        return arms[0] if arms else None
+
+    class MT_OT_PhysPresetApplySelected(Operator):
+        """只把预设套到选中的物理骨"""
+        bl_idname = "mt_framework.phys_preset_apply_selected"
+        bl_label = "套用预设（选中骨）"
+        bl_description = ("只改选中的物理骨：重力/阻尼等组参数改它所在的组，"
+                          "角度/质量/弹性只改选中的那几根；其它骨一个字节不动")
+
+        def execute(self, context):
+            arm = _pick_armature(context)
+            if arm is None:
+                self.report({'ERROR'}, '场景里没有骨架')
+                return {'CANCELLED'}
+            arc_path, ctc = recalled_arc(context)
+            if not ctc or ctc[:4] != b'CTC\x00':
+                self.report({'ERROR'}, '当前没有 CTC')
+                return {'CANCELLED'}
+            ids = _selected_phys_ids(context, arm, ctc)
+            if not ids:
+                self.report({'ERROR'},
+                            '没有选中物理骨：到编辑/姿态模式选中要改的骨，再点这里')
+                return {'CANCELLED'}
+            key = context.scene.MT_PhysPreset
+            try:
+                new, ng, nn = apply_preset_selected(ctc, key, ids)
+            except Exception as e:                      # noqa: BLE001
+                self.report({'ERROR'}, str(e))
+                return {'CANCELLED'}
+            if ng == 0:
+                self.report({'ERROR'},
+                            '选中的骨（%d 根）不在 CTC 的任何组里：先登记成物理骨'
+                            % len(ids))
+                return {'CANCELLED'}
+            remember_arc(context, arc_path, new)
+            self.report({'INFO'},
+                        '已给选中骨套用预设：%s（改 %d 组 / %d 个节点）'
+                        % (PHYS_PRESETS[key][0], ng, nn))
+            return {'FINISHED'}
+
+    class MT_OT_PhysWriteSelected(Operator):
+        """把面板参数只写进选中的物理骨"""
+        bl_idname = "mt_framework.phys_params_write_selected"
+        bl_label = "应用参数（选中骨）"
+        bl_description = ("只改选中的物理骨：组参数（重力/阻尼/...）改它所在的组，"
+                          "角度/质量/弹性只改选中的节点；其它骨一个字节不动")
+
+        def execute(self, context):
+            arm = _pick_armature(context)
+            if arm is None:
+                self.report({'ERROR'}, '场景里没有骨架')
+                return {'CANCELLED'}
+            arc_path, ctc = recalled_arc(context)
+            if not ctc or ctc[:4] != b'CTC\x00':
+                self.report({'ERROR'}, '当前没有 CTC')
+                return {'CANCELLED'}
+            ids = _selected_phys_ids(context, arm, ctc)
+            if not ids:
+                self.report({'ERROR'},
+                            '没有选中物理骨：到编辑/姿态模式选中要改的骨，再点这里')
+                return {'CANCELLED'}
+            sc = context.scene
+            try:
+                new, ng, nn = write_params_selected(
+                    ctc, ids, sc.MT_PhysGravity, sc.MT_PhysDamping,
+                    sc.MT_PhysSpring, sc.MT_PhysWind, sc.MT_PhysTrans,
+                    sc.MT_PhysLimit, sc.MT_PhysReflect,
+                    sc.MT_PhysAngle, sc.MT_PhysMass, sc.MT_PhysElastic)
+            except Exception as e:                      # noqa: BLE001
+                self.report({'ERROR'}, str(e))
+                return {'CANCELLED'}
+            if ng == 0:
+                self.report({'ERROR'},
+                            '选中的骨（%d 根）不在 CTC 的任何组里：先登记成物理骨'
+                            % len(ids))
+                return {'CANCELLED'}
+            remember_arc(context, arc_path, new)
+            self.report({'INFO'},
+                        '已给选中骨应用参数：改 %d 组 / %d 个节点' % (ng, nn))
+            return {'FINISHED'}
+
+
+    class MT_OT_PhysLockSelected(Operator):
+        """只锁选中节点：角度上限=0，不动重力/阻尼/风等组参数"""
+        bl_idname = "mt_framework.phys_lock_selected"
+        bl_label = "锁死选中节点（只改角度）"
+        bl_description = ("把选中物理骨节点的「角度上限」设为 0：它自己不摆动，"
+                          "但仍被前面的物理骨带着走；组参数一个字节不动")
+
+        def execute(self, context):
+            arm = _pick_armature(context)
+            if arm is None:
+                self.report({'ERROR'}, '场景里没有骨架')
+                return {'CANCELLED'}
+            arc_path, ctc = recalled_arc(context)
+            if not ctc or ctc[:4] != b'CTC\x00':
+                self.report({'ERROR'}, '当前没有 CTC')
+                return {'CANCELLED'}
+            ids = _selected_phys_ids(context, arm, ctc)
+            if not ids:
+                self.report({'ERROR'},
+                            '没有选中物理骨：到编辑/姿态模式选中链尾的骨，再点这里')
+                return {'CANCELLED'}
+            new, hit = lock_nodes(ctc, ids)
+            if hit == 0:
+                self.report({'ERROR'},
+                            '选中的骨（%d 根）不在 CTC 节点里：先登记成物理骨'
+                            % len(ids))
+                return {'CANCELLED'}
+            remember_arc(context, arc_path, new)
+            self.report({'INFO'},
+                        '已锁死选中节点：%d 个（只改角度上限，组参数未动）' % hit)
+            return {'FINISHED'}
+
+    _classes = [MT_OT_PhysRead, MT_OT_PhysWrite,
+                MT_OT_PhysWriteSelected, MT_OT_PhysLockSelected,
+                MT_OT_PhysPresetApply, MT_OT_PhysPresetApplySelected]
+
+    def register():
+        for c in _classes:
+            bpy.utils.register_class(c)
+        _register_props()
+
+    def unregister():
+        _unregister_props()
+        for c in reversed(_classes):
+            try:
+                bpy.utils.unregister_class(c)
+            except Exception:                           # noqa: BLE001
+                pass
+
+else:                                                   # pragma: no cover
+    def register():
+        pass
+
+    def unregister():
+        pass

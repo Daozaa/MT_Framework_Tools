@@ -1,0 +1,109 @@
+# -*- coding: utf-8 -*-
+"""FVF 对照表 (自动生成, 数据来自 3ds Max 原版插件 MT Framework.mzp 的 MTF\\i.txt)
+
+原表给每个 FVF 起了名字并标注能力:
+
+    [U1NS]    U1 = 1 组 UV 通道 (U12 = 2 组, U123 = 3 组, U1234 = 4 组)
+              N  = 含法线
+              S  = 含蒙皮 (骨骼索引 + 权重)
+    [U-201N]  另一种 UV 编码变体
+    _ow       同名变体
+
+用途: 用**可读名字**显示网格, 并知道每个 FVF 有几组 UV / 有没有蒙皮 / 有没有法线。
+注意: 原表里没有的 FVF (例如 0x0CB68015) 属于非标准格式 —— 与实测相符。
+"""
+
+#: 游戏模块索引 (原版插件 MTF\<n>.ms)
+#: FVF -> (类名, 能力标记)
+FVF_INFO = {
+    0x12553032: ('Model15', 'U123N'),
+    0x1273701E: ('SkinnedCharacterFace01', 'U1NS'),
+    0x14D40019: ('SkinnedCharacter01', 'U1NS'),
+    0x14D40021: ('SkinnedCharacter011', 'U1NS'),
+    0x1B9A2021: ('PaintedCharacter08', 'U-2012NS'),
+    0x207D6030: ('PaintedModel01', 'U-201N'),
+    0x207D6038: ('PaintedModel03', 'U-201'),
+    0x2082F03B: ('Model16', 'U123N'),
+    0x2F55C03D: ('SkinnedCharacter07', 'U1NS'),
+    0x366995A7: ('SkinnedCharacterFace05', 'U1NS'),
+    0x37A4E035: ('Model14', 'U1234N'),
+    0x3C730760: ('PaintedCharacter11', 'U-201NS'),
+    0x3F78800C: ('PaintedModel06', 'U-201N'),
+    0x4325A03E: ('Model08', 'U12N'),
+    0x43FB3015: ('SkinnedCharacter09', 'U1NS'),
+    0x49B4F022: ('PaintedModel02', 'U-201N'),
+    0x49B4F02A: ('PaintedModel021', 'U-201N'),
+    0x59DC400B: ('PaintedModel10', 'U-201N'),
+    0x5E7F202C: ('Model09', 'U12N'),
+    0x5E7F2030: ('Model06', 'U12N'),
+    0x6180300A: ('Model12', 'U1N'),
+    0x638F1011: ('Model05', 'U12N'),
+    0x63B6C02F: ('Model13', 'U123N'),
+    0x64593023: ('SkinnedCharacter03', 'U12NS'),
+    0x64593025: ('SkinnedCharacter031', 'U12NS'),
+    0x667B1019: ('SingleSkinnedCharacter04', 'U12NS'),
+    0x6A2E1016: ('SkinnedCharacter02', 'U1NS'),
+    0x707FB01C: ('PaintedCharacter06', 'U-2012NS'),
+    0x747D1031: ('Model10', 'U123N'),
+    0x75C3E025: ('SkinnedCharacterFace03', 'U12NS'),
+    0x77D87023: ('PaintedCharacter011', 'U-201NS'),
+    0x7BA7401B: ('PaintedCharacter09', 'U-201NS'),
+    0x818904DC: ('Model17', 'U1N'),
+    0x81F58067: ('SkinnedCharacterFace04', 'U1NS'),
+    0x82917009: ('Model04', 'U1N'),
+    0x866B6018: ('SkinnedCharacter12', 'U12NS'),
+    0x926FD02E: ('PaintedModel07', 'U-2012N'),
+    0x9399C037: ('PaintedModel071', 'U-2012N'),
+    0x9A9D201D: ('SkinnedCharacter11', 'U1NS'),
+    0x9DFD7019: ('SkinnedCharacter10', 'U1NS'),
+    0xA013501E: ('PaintedCharacter04', 'U-201NS'),
+    0xA013501F: ('PaintedCharacter03', 'U-201NS'),
+    0xA14E003C: ('PaintedModel08', 'U-2012N'),
+    0xA7D7D02F: ('Model02', 'U1N'),
+    0xA7D7D037: ('Model03', 'U1'),
+    0xA8FAB010: ('Model07', 'U1NS'),
+    0xA8FAB018: ('SingleSkinnedCharacter012', 'U1NS'),
+    0xA8FAB019: ('SingleSkinnedCharacter011', 'U1NS'),
+    0xAFA63031: ('Model091', 'U12N'),
+    0xB2FC0083: ('SkinnedCharacter16', 'U12NS'),
+    0xB392101F: ('SkinnedCharacter04', 'U12NS'),
+    0xB3921020: ('SkinnedCharacter041', 'U12NS'),
+    0xB6681034: ('PaintedModel09', 'U-20123N'),
+    0xB8E69244: ('PaintedCharacterFace01', 'U-2012NS'),
+    0xBB424025: ('SkinnedCharacterFace011', 'U1NS'),
+    0xC31F201D: ('SkinnedCharacter021', 'U1NS'),
+    0xC66FA03E: ('Model111', 'U12'),
+    0xC9690AB8: ('PaintedModel11', 'U-201234N'),
+    0xC9CFC012: ('SingleSkinnedCharacter03', 'U12NS'),
+    0xCBCF7027: ('SkinnedCharacterFace02', 'U12NS'),
+    0xCBF6C01A: ('PaintedModel05', 'U-201N'),
+    0xCBF6C01B: ('PaintedModel051', 'U-201N'),
+    0xCC510026: ('PaintedCharacter07', 'U-2012NS'),
+    0xCE5A801C: ('PaintedCharacter10', 'U-201NS'),
+    0xD1A47038: ('Model11', 'U12N'),
+    0xD6784014: ('SkinnedCharacter13', 'U1NS'),
+    0xD8297021: ('Model01', 'U1N'),
+    0xD8297029: ('PaintedModel04', 'U-201N'),
+    0xD829702C: ('Model011', 'U1N'),
+    0xD84E3026: ('PaintedCharacter05', 'U-201NS'),
+    0xD84E3027: ('PaintedCharacter02', 'U-201NS'),
+    0xD86CA01C: ('PaintedCharacter01', 'U-201NS'),
+    0xD877801B: ('SingleSkinnedCharacter02', 'U12NS'),
+    0xDA55A021: ('SkinnedCharacter05', 'U12NS'),
+    0xDA55A023: ('SkinnedCharacter051', 'U12NS'),
+    0xF471FE45: ('SkinnedCharacter15', 'U12NS'),
+    0xF606F017: ('SkinnedCharacter08', 'U1NS'),
+}
+
+#: 能力标记 -> FVF 列表
+FVF_BY_SIGNATURE = {}
+for _v, (_c, _s) in FVF_INFO.items():
+    FVF_BY_SIGNATURE.setdefault(_s, []).append(_v)
+
+def fvf_name(fvf):
+    """FVF -> 可读名字, 未知返回带说明的十六进制串。"""
+    info = FVF_INFO.get(fvf)
+    if not info:
+        return "0x%08X-unknown" % fvf
+    return "%s_%s" % (info[0], info[1])
+
