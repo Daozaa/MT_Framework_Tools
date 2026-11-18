@@ -1,19 +1,9 @@
-# -*- coding: utf-8 -*-
-"""给没有物理骨的 .mod 追加物理骨（把捐献者多出来的骨全部补上）。
-
-做法：以「物理防具」的 .mod 当骨骼捐献者，把它比目标**多出来的骨**
-（通常是 id 20/21/22，部分防具还有 23）连同 BoneInfo / lmat / amat / LUT
-一起追加到目标骨骼段末尾，再修正文件里所有绝对指针。
-
-追加在末尾 → 已有槽位号不变，顶点索引不用改；CTC 直接沿用捐献者的。
-"""
 from __future__ import annotations
 
 import struct
 
 INFO = 24
 MAT = 64
-
 
 def _bounds(data):
     n = struct.unpack_from('<H', data, 6)[0]
@@ -22,7 +12,6 @@ def _bounds(data):
     amat = lmat + n * MAT
     lut = amat + n * MAT
     return n, ptr, lmat, amat, lut
-
 
 def _worlds(data):
     n, ptr, lmat, amat, lut = _bounds(data)
@@ -35,14 +24,11 @@ def _worlds(data):
         out.append(tuple(c[k] - a[k] for k in range(3)))
     return c, out
 
-
 def bone_ids(mod_bytes):
     n, ptr, lmat, amat, lut = _bounds(mod_bytes)
     return [mod_bytes[ptr + i * INFO] for i in range(n)]
 
-
 def extra_bones(donor, target):
-    """捐献者里目标没有的骨（按槽位顺序）。"""
     tids = set(bone_ids(target))
     n, ptr, lmat, amat, lut = _bounds(donor)
     out = []
@@ -57,7 +43,6 @@ def extra_bones(donor, target):
             amat=bytes(donor[amat + i * MAT: amat + (i + 1) * MAT]),
         ))
     return out
-
 
 def append_physics_bones(target: bytes, donor: bytes):
     extras = extra_bones(donor, target)
@@ -74,12 +59,11 @@ def append_physics_bones(target: bytes, donor: bytes):
     tc = [t_at0[k] + t_lt0[k] for k in range(3)]
     _, t_world = _worlds(target)
     _, d_world = _worlds(donor)
-    # 骨架缩放：新骨必须用**目标的** amat 缩放，抄捐献者会让蒙皮缩小/放大
+
     t_scale = abs(struct.unpack_from('<f', target, tamat)[0]) or 1.0
     d_scale = abs(struct.unpack_from('<f', donor, damat)[0]) or 1.0
 
     def _ratio(par_slot, d_par_slot):
-        """骨架比例 = 父骨到原点距离之比（官方同骨架=1，改过比例的身体≈1.5）。"""
         if not (0 <= par_slot < tn) or not (0 <= d_par_slot < dn):
             return 1.0
         a = sum(v * v for v in t_world[par_slot]) ** 0.5
@@ -114,7 +98,7 @@ def append_physics_bones(target: bytes, donor: bytes):
             par_slot = tslot[par_id]
             pw = t_world[par_slot]
         else:
-            # 同 id 在目标里对不上 → 用世界坐标最近的骨当父骨
+
             dw = d_world[b['parent']] if b['parent'] < dn else None
             best, bd = None, 1e9
             if dw is not None:
@@ -135,11 +119,10 @@ def append_physics_bones(target: bytes, donor: bytes):
         parent_map[b['id']] = par_slot
         info = bytearray(b['info'])
         struct.pack_into('<B', info, 1, par_slot)
-        struct.pack_into('<B', info, 2, new_slot)          # mirror = 自己
+        struct.pack_into('<B', info, 2, new_slot)
         struct.pack_into('<f', info, 8, (local[0] ** 2 + local[1] ** 2 + local[2] ** 2) ** 0.5)
         struct.pack_into('<3f', info, 12, *local)
-        # 矩阵是 4x4 行主序（16 float = 64 字节）：3x3 在 0..48，行尾 w 在 12/28/44，
-        # 平移在 48..60，最后一个是 1.0。整块复制再改，别只写 9 个 float。
+
         dm = struct.unpack_from('<16f', donor, damat + b['slot'] * MAT)
         dk = t_scale / d_scale
         lm = list(dm)
@@ -177,7 +160,7 @@ def append_physics_bones(target: bytes, donor: bytes):
     out = bytearray(target[:tptr] + new_bone + target[tptr + old_bone_len:])
 
     struct.pack_into('<H', out, 6, tn + len(extras))
-    # 所有绝对指针都要跟着后移：ptr_BoneMap(40) ptr_MatID(44) ptr_Mesh(48) ptr_vertex(52) ptr_triangle(56)
+
     for off in (40, 44, 48, 52, 56):
         v = struct.unpack_from('<I', target, off)[0]
         if v:

@@ -1,15 +1,3 @@
-# -*- coding: utf-8 -*-
-""".arc 读写 + 物理数据（CTC）同步。
-
-MHGU 的防具是 `body.arc` 这样的包，里面除了 `.mod` 还可能有：
-  * `.mrl` 材质（extHash 0x2749C8A8）
-  * `.tex` 贴图（0x241F5DEB）
-  * **CTC 物理数据**（0x535D969F，magic `CTC\\0`）
-
-以前插件只处理 `.mod`，改物理防具会丢 CTC。现在：
-  * 导入 `.arc` 时自动解出 `.mod` 并记住 CTC
-  * 导出时把新的 `.mod` 塞回原 arc，CTC 原样保留 → 物理效果不丢
-"""
 from __future__ import annotations
 
 import base64
@@ -22,8 +10,6 @@ CTC_HASH = 0x535D969F
 MOD_MAGIC = b'MOD\x00'
 CTC_MAGIC = b'CTC\x00'
 
-
-# --------------------------------------------------------------------- arc
 def arc_entries(data):
     if data[:4] != b'ARC\x00':
         raise ValueError('不是 ARC\\0 格式')
@@ -36,17 +22,15 @@ def arc_entries(data):
         raw = data[ofs:ofs + csz]
         try:
             body = zlib.decompress(raw)
-        except Exception:                               # noqa: BLE001
+        except Exception:
             body = raw
         out.append(dict(name=name, hash=h, flag=flag, raw=raw, body=body))
         off += 80
     return out
 
-
 def arc_build(entries):
     head = b'ARC\x00' + struct.pack('<HH', 17, len(entries)) + b'\0\0\0\0'
-    # 原版小 arc 数据区从 0x8000 开始；条目很多时（v06 这类 NPC 包，544 条）
-    # 80*N 会超过 0x8000，必须把数据区推到表后面（v06 官方是 0x10000）。
+
     need = 0x0C + 80 * len(entries)
     base = 0x8000
     if need > base:
@@ -71,17 +55,13 @@ def arc_build(entries):
     gap = base - 0x0C - 80 * len(entries)
     return head + bytes(table) + b'\0' * gap + bytes(body)
 
-
 def find_entry(entries, magic):
     for e in entries:
         if e['body'][:4] == magic:
             return e
     return None
 
-
-# --------------------------------------------------------------------- 导入
 def import_arc_file(path):
-    """解出 arc 里的 .mod 并返回 (临时 mod 路径, ctc 字节, arc 路径)。"""
     with open(path, 'rb') as f:
         data = f.read()
     entries = arc_entries(data)
@@ -96,14 +76,9 @@ def import_arc_file(path):
         f.write(mod['body'])
     return tmp, (ctc['body'] if ctc else b''), path
 
-
-# --------------------------------------------------------------------- 导出
-# 最后一次 CTC 过滤的结果 (旧节点数, 新节点数)；None 表示没过滤
 LAST_CTC_FILTER = None
 
-
 def export_arc(context, arc_path, mod_path, mod_bytes, dst=None):
-    """把新的 .mod 写回 arc，CTC 保留（没有就新增），输出 <arc>.new。"""
     with open(arc_path, 'rb') as f:
         entries = arc_entries(f.read())
     mod = find_entry(entries, MOD_MAGIC)
@@ -113,13 +88,10 @@ def export_arc(context, arc_path, mod_path, mod_bytes, dst=None):
     mod['raw'] = zlib.compress(mod_bytes, 9)
     mod['flag'] = (mod['flag'] & 0xFF000000) | (len(mod_bytes) & 0xFFFFFF)
 
-    # 头盔显示：用改过的 XFS 覆盖
     try:
         from .MTframework_MHGU_helmd import get_modified_xfs, read_disp
         _xfs = get_modified_xfs(context)
-        # ★ 1.2.194：随从猫（otomo）不能套用玩家的藏头位 FC00/81FF。
-        #   otomo 的 XFS 是 FFFE/FFFF（藏 1 件）或 FFFE/FFFD（藏 2 件）；
-        #   玩家那套写进猫 arc 不生效，还会把原文件的 XFS 覆盖掉 → 直接忽略。
+
         if _xfs and '\\otomo\\' in (arc_path or '').replace('/', '\\').lower():
             _v0, _v1, _n, _mix = read_disp(_xfs)
             if (_v0, _v1) in ((0xFC00, 0x81FF), (0xFC01, 0xFFFF)):
@@ -136,12 +108,11 @@ def export_arc(context, arc_path, mod_path, mod_bytes, dst=None):
                 _e['flag'] = (_e['flag'] & 0xFF000000) | (len(_xfs) & 0xFFFFFF)
                 break
 
-    # 有物理链但原 arc 没有 CTC 条目 -> 新增
     global LAST_CTC_FILTER
     LAST_CTC_FILTER = None
     _arc_path, ctc_bytes = recalled_arc(context)
     if ctc_bytes:
-        # ★ 兜底：CTC 里引用不存在的骨 → 游戏里链条拽空骨（乱飞/不显示）
+
         try:
             from .MTframework_MHGU_ctc import filter_nodes
             from .MTframework_MHGU_boneadd import bone_ids
@@ -158,19 +129,18 @@ def export_arc(context, arc_path, mod_path, mod_bytes, dst=None):
             elif not _f:
                 print('[MT] 警告：CTC 引用的骨在模型里都不存在，已跳过物理数据')
                 ctc_bytes = b''
-        except Exception:                               # noqa: BLE001
+        except Exception:
             pass
-        # ★ 导出兜底：矩阵 P 必须配 +4=2、单位阵必须配 +4=1（配错会把摆动轴从 X 变成 Z/Y）
+
         try:
             from .MTframework_MHGU_physmat import fix_matrix_modes
             _fixed, _nfix = fix_matrix_modes(ctc_bytes)
             if _nfix:
                 print('[MT] 修正矩阵/mAngleMode 配对：%d 个节点' % _nfix)
                 ctc_bytes = _fixed
-        except Exception:                               # noqa: BLE001
+        except Exception:
             pass
-        # ★ 最后一道：CTC 头必须完好（magic / version=22 / +8=0 / +12=1000）。
-        #   写坏版本号 → 游戏直接不认 CTC → 完全没有物理。
+
         try:
             import struct as _st2
             if ctc_bytes[:4] == CTC_MAGIC:
@@ -185,20 +155,19 @@ def export_arc(context, arc_path, mod_path, mod_bytes, dst=None):
                     ctc_bytes = bytes(_hb)
                     print('[MT] CTC 头被修回：version %d -> 22（+8=%d +12=%d）'
                           % (_ver, _v8, _v12))
-        except Exception:                               # noqa: BLE001
+        except Exception:
             pass
-    # ★ 1.2.195：碰撞胶囊 CCL（只在 helm/hair 槽生效）+ 打开 CTC 的碰撞标志位
-    # ★ 1.2.197：场景里手填了 MT_CclCapsules 就用它；解析为空才退回自动 11 个身体胶囊
+
     try:
         from . import MTframework_MHGU_ccl as _CCL
         _custom_caps = _CCL.capsules_from_json(
             getattr(context.scene, 'MT_CclCapsules', '') or '')
-    except Exception:                                   # noqa: BLE001
+    except Exception:
         _CCL = None
         _custom_caps = []
     _ccl_on = bool(getattr(context.scene, 'MT_CclEnable', False))
     if _custom_caps:
-        _ccl_on = True          # 手填了胶囊 = 要写 CCL，不用再勾复选框
+        _ccl_on = True
     if _ccl_on and _CCL is not None:
         try:
             _low = (arc_path or '').replace('/', '\\').lower()
@@ -222,13 +191,12 @@ def export_arc(context, arc_path, mod_path, mod_bytes, dst=None):
             else:
                 print('[MT] 警告：CCL 只在 helm / hair 槽生效，当前 arc 不是该槽，已跳过写入'
                       '（body/wst/arm/leg 的 CCL 游戏里不会用）')
-        except Exception as _e_cc:                      # noqa: BLE001
+        except Exception as _e_cc:
             print('[MT] CCL 写入失败:', _e_cc)
-    # ★ 1.2.196：CTC 解算迭代（header +52/+53）。官方 body 全是 (1,1)；
-    #   第三方外观工坊实测长/弯的发束用 3 次迭代，一次迭代在紧根部限位时会被拉长。
+
     try:
         _it = int(context.scene.get('MT_PhysIter', 1) or 1)
-    except Exception:                                   # noqa: BLE001
+    except Exception:
         _it = 1
     if ctc_bytes and _it != 1 and ctc_bytes[:4] == b'CTC\x00' and len(ctc_bytes) >= 0x38:
         _it = max(1, min(3, _it))
@@ -237,8 +205,7 @@ def export_arc(context, arc_path, mod_path, mod_bytes, dst=None):
         _hb[53] = _it
         ctc_bytes = bytes(_hb)
         print('[MT] CTC 解算迭代设为 %d（header +52/+53）' % _it)
-    # ★ 1.2.197：骨段碰撞（ShapeObject=2）—— 只改节点 +6 和 CTC 头 +54，其它字节不动
-    #   工程里没有 CTC 时（只有容器带 CTC）也对容器那份做后处理，否则开关看起来没效果。
+
     if bool(getattr(context.scene, 'MT_PhysSegment', False)):
         try:
             from .MTframework_MHGU_ctc import set_segment_shapes
@@ -263,12 +230,12 @@ def export_arc(context, arc_path, mod_path, mod_bytes, dst=None):
                           % (_sg, _sn, _sc))
                 else:
                     print('[MT] 警告：骨段碰撞没生效（CTC 结构不认识）')
-        except Exception as _e_seg:                     # noqa: BLE001
+        except Exception as _e_seg:
             print('[MT] 骨段碰撞失败:', _e_seg)
     if ctc_bytes:
         ctc = find_entry(entries, CTC_MAGIC)
         if ctc is not None:
-            # ★ 原 arc 已有 CTC 时必须替换，否则合并进来的新链没有数据
+
             ctc['body'] = ctc_bytes
             ctc['raw'] = zlib.compress(ctc_bytes, 9)
             ctc['flag'] = (ctc['flag'] & 0xFF000000) | (len(ctc_bytes) & 0xFFFFFF)
@@ -283,15 +250,12 @@ def export_arc(context, arc_path, mod_path, mod_bytes, dst=None):
         f.write(out)
     return dst
 
-
-# --------------------------------------------------------------------- 场景状态
 def remember_arc(context, arc_path, ctc_bytes):
     sc = context.scene
     sc['MT_ArcPath'] = arc_path or ''
     if arc_path:
         sc['MT_ArcPathLast'] = arc_path
     sc['MT_ArcCtc'] = base64.b64encode(ctc_bytes).decode('ascii') if ctc_bytes else ''
-
 
 def recalled_arc(context):
     sc = context.scene
@@ -300,23 +264,19 @@ def recalled_arc(context):
     ctc = base64.b64decode(ctc_b64) if ctc_b64 else b''
     return path, ctc
 
-
-# --------------------------------------------------------------------- bpy 依赖
 try:
     import bpy
     from bpy.props import StringProperty
     from bpy.types import Operator
-except Exception:                                       # noqa: BLE001
+except Exception:
     bpy = None
 
-
 def _apply(operator, context, filepath):
-    """导入 .arc 或 .mod：arc 时解出 mod 再走原导入流程。"""
     low = filepath.lower()
     if low.endswith('.arc'):
         try:
             tmp, ctc, arc = import_arc_file(filepath)
-        except Exception as e:                          # noqa: BLE001
+        except Exception as e:
             operator.report({'ERROR'}, '解析 arc 失败: %s' % e)
             return False
         remember_arc(context, arc, ctc)
@@ -333,9 +293,7 @@ def _apply(operator, context, filepath):
     import_mod_file(filepath, props.game_fix)
     return True
 
-
 def _phys_armature(context):
-    """挑「有物理骨」的那副骨架（场景里可能还留着 MMD 的 Armature）。"""
     import re as _re
     arms = [o for o in context.scene.objects if o.type == 'ARMATURE']
     best, best_n = None, 0
@@ -354,13 +312,7 @@ def _phys_armature(context):
             return o
     return arms[0] if arms else None
 
-
 def _ensure_template(operator, context):
-    """导出前自愈：模板比骨架少骨（工程没保存 / 被别的工程覆盖）就按骨架重建。
-
-    不这么做的话：模板 20 骨 → 骨骼回写被跳过 → CTC 被裁到 1 个节点 →
-    导出的 arc 看起来“成功”，进游戏权重全错。
-    """
     try:
         from .MTframework_MHGU_physcustom import (
             template_needs_rebuild, rebuild_template_only,
@@ -392,14 +344,14 @@ def _ensure_template(operator, context):
         if need and not mismatch:
             new_mod, _info = rebuild_template_only(mod, arm, off, preset)
         else:
-            # 模板多骨/少骨都按骨架全量重建；多骨时槽位会变，骨名+顶点组一起改
+
             new_mod, _info = rebuild_template_from_armature(mod, arm, off, preset)
             rename = {k: v for k, v in (_info.get('rename') or {}).items() if k != v}
             if rename:
                 _nb, _ng = _rename_bones(arm, rename)
                 try:
                     arm['MT_PhysIdMap'] = {str(k): v for k, v in _info['names'].items()}
-                except Exception:                       # noqa: BLE001
+                except Exception:
                     pass
                 renamed = '；骨名/顶点组按新槽位重命名 %d 骨 / %d 组' % (_nb, _ng)
         tmp = _template_path()
@@ -409,36 +361,33 @@ def _ensure_template(operator, context):
         try:
             from .MTframework_MHGU_tpl import store as _tpl_store
             _tpl_store(context, tmp)
-        except Exception:                               # noqa: BLE001
+        except Exception:
             pass
         try:
             import MT_Framework_Tools.MTframework_MHGU_import as _imp
             _imp._last_import_path = tmp
-        except Exception:                               # noqa: BLE001
+        except Exception:
             pass
         operator.report({'INFO'},
                         '模板与骨架不一致（模板 %d 骨 / 物理 %d，骨架物理 %d），'
                         '已按骨架重建为 %d 骨%s'
                         % (n_tpl, len(tpl_phys), len(arm_phys),
                            struct.unpack_from('<H', new_mod, 6)[0], renamed))
-    except Exception as e:                              # noqa: BLE001
+    except Exception as e:
         operator.report({'WARNING'}, '模板自动重建失败：%s（导出可能不完整）' % e)
 
-
 def _export(operator, context, filepath):
-    # ★ 1.2.189：编辑/权重/姿态模式下 mesh.vertices 与 UV 数据是空的，导出会崩
-    #   （IndexError: bpy_prop_collection[index] ... size 0）→ 先切回物体模式。
+
     try:
         if bpy.context.mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
-    except Exception:                                   # noqa: BLE001
+    except Exception:
         pass
-    # ★ 1.2.185：先按 .blend 内嵌的模板同步（另存分支时场景里的路径可能指向别的工程），
-    #   再走「模板 vs 骨架」自愈。顺序反了会先按坏模板重建，把内嵌的好模板冲掉。
+
     try:
         from .MTframework_MHGU_tpl import sync as _tpl_sync
         _tpl_sync(context)
-    except Exception:                                   # noqa: BLE001
+    except Exception:
         pass
     _ensure_template(operator, context)
     from .MTframework_MHGU_export import export_mod_file
@@ -455,8 +404,7 @@ def _export(operator, context, filepath):
             operator.report({'ERROR'}, '导出失败: 找不到模板文件 (请先导入一个 .mod)')
         return None
     arc_path, ctc_bytes = recalled_arc(context)
-    # ★ 重新导入过 .mod 会把「当前 arc」清掉（.mod 本身没有 arc 结构），
-    #   但用户往往只是想刷新模型、还是要导回原来那个 arc —— 用上次记住的容器兜底。
+
     if not arc_path:
         _last = context.scene.get('MT_ArcPathLast', '') or ''
         if _last and os.path.exists(_last):
@@ -467,8 +415,6 @@ def _export(operator, context, filepath):
                             '如果不对，到「模型」区点「选择 arc 容器」重选' % _last)
     _ctc = ctc_bytes
 
-    # ★ 1.2.186：模型有物理骨、工程里却没有 CTC（只导入了 .mod / 分支把场景数据丢了 /
-    #   另存工程换了容器）→ 按骨架重建一份，否则导出的 arc 没有 CTC，进游戏完全没物理。
     if not _ctc:
         try:
             from .MTframework_MHGU_physcustom import build_ctc_from_bones
@@ -494,17 +440,15 @@ def _export(operator, context, filepath):
                         {'WARNING'},
                         '工程里没有物理 CTC，已按骨架自动重建（%d 组 / %d 节点）'
                         % (_g0, _n0c))
-        except Exception as _e0:                        # noqa: BLE001
+        except Exception as _e0:
             print('[MT] 自动生成 CTC 失败:', _e0)
 
-    # ★ 模板与骨架一致性：旧工程里 MT_LastImportPath 可能指向过期模板
-    #   （比如骨架是 2×2，模板却是 3+3 的临时文件）→ 导出的骨头会多出来。
     try:
         import re as _re
         _arm = _phys_armature(context)
         _tpl = context.scene.get('MT_LastImportPath', '') or ''
         if _arm is not None and _tpl and os.path.exists(_tpl):
-            # ★ 1.2.98：物理骨不再只限 b_20~b_27，按「b_<数字> 且 >=20」认
+
             _arm_phys = []
             for _b in _arm.data.bones:
                 _m = _re.match(r'^b_(\d+)(?:\.[lr])?$', _b.name)
@@ -521,24 +465,22 @@ def _export(operator, context, filepath):
                 _healed = False
                 try:
                     _strict = bool(getattr(props, 'strict_phys', False))
-                except Exception:                       # noqa: BLE001
+                except Exception:
                     _strict = False
-                # ★ 1.2.106：模板比骨架**少**骨 → 顶点会绑到不存在的骨上
-                #   （游戏里表现为拉丝/塌陷），必须拦住，不再只是警告。
+
                 if len(_tpl_phys) < len(_arm_phys):
-                    # ★ 1.2.184：不再直接拦。先按骨架自动重建模板，再重导一次。
-                    #   分支工程常把别的工程的模板带过来，表现就是"导出不了了"。
+
                     _tpl0 = _tpl
                     _fixed = None
                     try:
                         _ensure_template(operator, context)
-                    except Exception as _e3:                # noqa: BLE001
+                    except Exception as _e3:
                         print('[MT] 重建模板失败:', _e3)
                     _tpl1 = context.scene.get('MT_LastImportPath', '') or ''
                     if _tpl1 and _tpl1 != _tpl0 and os.path.exists(_tpl1):
                         try:
                             _fixed = export_mod_file(filepath, props.game_fix)
-                        except Exception as _e4:            # noqa: BLE001
+                        except Exception as _e4:
                             print('[MT] 重建模板后重导失败:', _e4)
                     if _fixed:
                         out = _fixed
@@ -573,11 +515,11 @@ def _export(operator, context, filepath):
                     operator.report({'ERROR'}, _msg + '\n（严格模式已开，可在面板「导入设置」里关掉）')
                     return None
                 operator.report({'WARNING'}, _msg + '\n已继续导出（关掉严格模式的结果）')
-    except Exception:                                   # noqa: BLE001
+    except Exception:
         pass
-    # ★ 物理自检：CTC 与最终 .mod 的骨骼对不上就直接拦下（比进游戏再查省事）
+
     if _ctc:
-        # 单节点组提醒：官方 786 个 CTC 里每组都是 2~4 个节点，1 个节点静止姿态不稳
+
         try:
             _ng = struct.unpack_from('<I', _ctc, 0x10)[0]
             _singles = 0
@@ -589,7 +531,7 @@ def _export(operator, context, filepath):
                                 'CTC 里有 %d 个「单节点组」：官方每组至少 2 个节点，'
                                 '单骨链进游戏容易塌。导出后到「物理骨骼 → 自定义物理骨」'
                                 '点 **补全单节点物理链**，再导出一次。' % _singles)
-        except Exception:                               # noqa: BLE001
+        except Exception:
             pass
         try:
             from .MTframework_MHGU_ctc import check_topology
@@ -597,9 +539,7 @@ def _export(operator, context, filepath):
                 _mod_bytes = _f.read()
             _probs = check_topology(_mod_bytes, _ctc)
             if _probs:
-                # ★ 先按**模板物理骨**重建（每根骨恰好一个节点，1.2.139 的链分配不会
-                #   再造出假单链）；rebuild_from_bones 只在没有骨架时兜底 ——
-                #   它会沿用旧 CTC 的链结构，可能把 1 节点组保留下来。
+
                 _built = None
                 try:
                     from .MTframework_MHGU_physcustom import build_ctc_from_bones
@@ -611,7 +551,7 @@ def _export(operator, context, filepath):
                             get_object_center_offset(_arm2, context.scene),
                             getattr(context.scene, 'MT_PhysPreset', 'cloth_std'),
                             ctc_bytes=_ctc)
-                except Exception as _e2:                # noqa: BLE001
+                except Exception as _e2:
                     print('[MT] 按模板重建 CTC 失败:', _e2)
                 _fixed = None
                 if _built and not check_topology(_mod_bytes, _built):
@@ -624,7 +564,7 @@ def _export(operator, context, filepath):
                 if _fixed is not None:
                     ctc_bytes = _fixed
                     _ctc = _fixed
-                    # 写回场景，下面 export_arc 会重新 recalled_arc
+
                     remember_arc(context, arc_path, ctc_bytes)
                     _ng2, _nc2 = struct.unpack_from('<II', _fixed, 0x10)
                     print('[MT] CTC 已自动重建：%d 组 / %d 节点（原因：%s）'
@@ -640,11 +580,9 @@ def _export(operator, context, filepath):
                               '请先点「重建物理模板」/「补全单节点物理链」，或重新导入一次 .arc。')
                     operator.report({'ERROR'}, _msg)
                     return None
-        except Exception:                               # noqa: BLE001
+        except Exception:
             pass
-    # ★ 自定义链：拓扑对得上 ≠ 矩阵对。旧版写出的「骨方向矩阵 + mode1」会原样进 arc，
-    #   引擎取到斜轴 → 朝向一变物理就偏。只要 CTC 是插件生成的（MT_CtcCustom），
-    #   导出前统一规范成 P/mode2（链首+中间）、I/mode1（链尾）。
+
     if _ctc and context.scene.get('MT_CtcCustom'):
         try:
             from .MTframework_MHGU_physmat import rebuild_matrices
@@ -656,10 +594,9 @@ def _export(operator, context, filepath):
                     _ctc = _cc
                     remember_arc(context, arc_path, ctc_bytes)
                     print('[MT] 自定义链矩阵规范化：%d 个节点' % len(_rep_c))
-        except Exception:                               # noqa: BLE001
+        except Exception:
             pass
-    # ★ 导出前最后一道：CTC 节点引用的骨必须都在最终 .mod 里，
-    #   否则 export_arc 的兜底过滤会把这些链裁掉（例如模板 20 骨时 51 节点→1）。
+
     if _ctc:
         try:
             from .MTframework_MHGU_boneadd import bone_ids as _bids
@@ -678,11 +615,10 @@ def _export(operator, context, filepath):
                     '请先点「重建物理模板」/「补全单节点物理链」，或重新导入一次 .arc。'
                     % (len(_missing), _missing[:8]))
                 return None
-        except Exception:                               # noqa: BLE001
+        except Exception:
             pass
     want_arc = filepath.lower().endswith('.arc')
-    # 材质名链接检查：.mod 里的材质名必须能在 arc 的 mrl 里找到（crc32^~0），
-    # 否则那些网格在游戏里根本不画 —— "模型不显示"最常见的一条。
+
     try:
         from .MTframework_MHGU_matcheck import check as _mcheck, describe as _mdesc
         if arc_path and os.path.exists(arc_path):
@@ -695,31 +631,29 @@ def _export(operator, context, filepath):
                 _r = _mcheck(_mb, _m0['body'])
                 if _r is not None and _r['missing']:
                     operator.report({'WARNING'}, _mdesc(_r))
-    except Exception:                                   # noqa: BLE001
+    except Exception:
         pass
-    # 没记住 arc 时：如果用户把导出名指向一个已存在的 .arc，就拿它当容器
+
     if not arc_path and want_arc and os.path.exists(filepath):
         try:
             with open(filepath, 'rb') as f:
                 if f.read(4) == b'ARC\x00':
                     arc_path = filepath
                     context.scene['MT_ArcPath'] = filepath
-        except Exception:                               # noqa: BLE001
+        except Exception:
             pass
     if arc_path and os.path.exists(arc_path):
         try:
             with open(out, 'rb') as f:
                 mod_bytes = f.read()
-            # ★ arc 一律写到**导出目录**：
-            #   旧写法在这条分支传 dst=None，arc 就被写到容器旁边
-            #   （容器在别的文件夹时，用户会以为"没导出"）
+
             if want_arc:
                 dst = filepath
             else:
                 dst = os.path.splitext(filepath)[0] + '.arc'
             new_arc = export_arc(context, arc_path, out, mod_bytes, dst)
             if want_arc:
-                # 导出 .arc 时那份中间 .mod.new 只是临时产物，删掉免得混淆
+
                 try:
                     os.remove(out)
                 except Exception:
@@ -727,7 +661,7 @@ def _export(operator, context, filepath):
                 operator.report({'INFO'}, '已导出 arc: %s' % new_arc)
             else:
                 operator.report({'INFO'}, '已导出 .mod: %s ；arc: %s' % (out, new_arc))
-        except Exception as e:                          # noqa: BLE001
+        except Exception as e:
             operator.report({'WARNING'}, '.mod 已导出(%s)，但重建 arc 失败: %s' % (out, e))
     elif want_arc:
         operator.report({'ERROR'},
@@ -740,11 +674,9 @@ def _export(operator, context, filepath):
         operator.report({'INFO'}, '已导出: %s' % out)
     return out
 
-
 if bpy is not None:
 
     class MT_OT_SetArcContainer(Operator):
-        """指定导出用的 arc 容器（原版防具 arc）"""
         bl_idname = "mt_framework.set_arc_container"
         bl_label = "选择 arc 容器"
         bl_description = "选一个原版防具 .arc 当容器；导出时会替换里面的 .mod 并保留其它条目"
@@ -760,7 +692,7 @@ if bpy is not None:
                 with open(self.filepath, 'rb') as f:
                     data = f.read()
                 entries = arc_entries(data)
-            except Exception as e:                      # noqa: BLE001
+            except Exception as e:
                 self.report({'ERROR'}, '读取失败: %s' % e)
                 return {'CANCELLED'}
             if find_entry(entries, MOD_MAGIC) is None:
@@ -780,7 +712,6 @@ if bpy is not None:
             return {'RUNNING_MODAL'}
 
     class MT_OT_ImportArc(Operator):
-        """导入 .arc（自动解出 .mod，并记住里面的物理 CTC）"""
         bl_idname = "mt_framework.import_arc"
         bl_label = "导入 ARC"
         bl_description = "导入防具 .arc：自动解包 .mod，并保留物理数据 (CTC)"
@@ -812,7 +743,7 @@ if bpy is not None:
             except Exception:
                 pass
 
-else:                                                   # pragma: no cover
+else:
     def register():
         pass
 

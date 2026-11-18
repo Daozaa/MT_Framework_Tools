@@ -1,12 +1,3 @@
-# -*- coding: utf-8 -*-
-"""头盔显示（藏头 / 露脸）：改 helm arc 里 XFS 的 disp0 / disp1。
-
-XFS 结构（helm 用，1097 字节）：
-  记录区 = 文件末尾 640 字节 = 32 条 × 20 字节
-  每条：+0 u16 0x0005、+2 u16 0x0002、+4 u32、+8 u32、+12 u16 disp0、+14 u32、+18 u16 disp1
-  disp0 低 3 位 = 脸 / 前发 / 后发 是否显示（1=显示）
-  disp1 = 0xFFFF 会露脸；0x81FF 能藏头且不阻断物理（参考包实测）
-"""
 from __future__ import annotations
 
 import base64
@@ -17,12 +8,12 @@ try:
     import bpy
     from bpy.props import EnumProperty, IntProperty
     from bpy.types import Operator
-except Exception:                                       # noqa: BLE001
+except Exception:
     bpy = None
 
 XFS_MAGIC = b'XFS\x00'
 REC_SZ = 20
-TAIL_SZ = 640                   # 32 条记录
+TAIL_SZ = 640
 DISP0_OFF = 12
 DISP1_OFF = 18
 
@@ -32,25 +23,19 @@ PRESETS = {
     'hide_all':  ("全藏头",   0xFC00, 0x81FF),
 }
 
-# ★ 1.2.193：随从猫（otomo）的藏头位跟玩家 helm **不是一套**。
-#   官方 183 个 otomo h.arc 的 XFS 统计：FFFE/FFFF ×92、FFFE/FFFD ×59、FFFF/FFFF ×30，
-#   而玩家那套 FC00/81FF 在猫身上不表示藏头（实测填了不生效）。
 CAT_PRESETS = {
     'cat_hide1': ("猫·藏头（藏 1 件）",   0xFFFE, 0xFFFF),
     'cat_hide2': ("猫·藏头+耳（藏 2 件）", 0xFFFE, 0xFFFD),
     'cat_show':  ("猫·不藏（原样）",     0xFFFF, 0xFFFF),
 }
 
-
 def is_otomo_arc(context):
-    """当前 arc 是不是随从猫的（路径里带 otomo）。"""
     try:
         p = context.scene.get('MT_ArcPath', '') or ''
-    except Exception:                                   # noqa: BLE001
+    except Exception:
         p = ''
     p = p.replace('/', '\\').lower()
     return '\\otomo\\' in p or p.endswith('otomo') or '\\otomo\\mod\\' in p
-
 
 def _find_xfs(entries):
     for e in entries:
@@ -58,9 +43,7 @@ def _find_xfs(entries):
             return e
     return None
 
-
 def arc_xfs(context):
-    """当前 arc 里的 XFS 条目（bytes）。"""
     from .MTframework_MHGU_phys import arc_entries
     arc = context.scene.get('MT_ArcPath', '') or ''
     if not arc or not os.path.exists(arc):
@@ -72,14 +55,12 @@ def arc_xfs(context):
     e = _find_xfs(arc_entries(data))
     return e['body'] if e else None
 
-
 def _rec_start(size):
     if size >= TAIL_SZ and (size - TAIL_SZ) % REC_SZ == 0:
         return size - TAIL_SZ
     if size >= REC_SZ and size % REC_SZ == 0:
         return 0
     return size - TAIL_SZ if size > TAIL_SZ else 0
-
 
 def read_disp(xfs):
     start = _rec_start(len(xfs))
@@ -94,7 +75,6 @@ def read_disp(xfs):
     v0, v1 = sorted(vals)[0]
     return v0, v1, n, len(vals) > 1
 
-
 def write_disp(xfs, disp0, disp1):
     b = bytearray(xfs)
     start = _rec_start(len(b))
@@ -105,19 +85,15 @@ def write_disp(xfs, disp0, disp1):
         struct.pack_into('<H', b, o + DISP1_OFF, int(disp1) & 0xFFFF)
     return bytes(b), n
 
-
 def get_modified_xfs(context):
     b64 = context.scene.get('MT_ArcXfs', '') or ''
     return base64.b64decode(b64) if b64 else b''
 
-
 def set_modified_xfs(context, data):
     context.scene['MT_ArcXfs'] = base64.b64encode(data).decode('ascii')
 
-
 def clear_modified_xfs(context):
     context.scene['MT_ArcXfs'] = ''
-
 
 if bpy is not None:
 
@@ -136,11 +112,10 @@ if bpy is not None:
         for k in ('MT_HelmPreset', 'MT_HelmDisp0', 'MT_HelmDisp1'):
             try:
                 delattr(bpy.types.Scene, k)
-            except Exception:                           # noqa: BLE001
+            except Exception:
                 pass
 
     class MT_OT_HelmRead(Operator):
-        """读取头盔 arc 的 disp0/disp1"""
         bl_idname = "mt_framework.helm_disp_read"
         bl_label = "读取显示标志"
         bl_description = "从当前 arc 的 XFS 里读出 disp0 / disp1"
@@ -152,7 +127,7 @@ if bpy is not None:
                 return {'CANCELLED'}
             try:
                 v0, v1, n, mixed = read_disp(xfs)
-            except Exception as e:                      # noqa: BLE001
+            except Exception as e:
                 self.report({'ERROR'}, str(e))
                 return {'CANCELLED'}
             context.scene.MT_HelmDisp0 = v0
@@ -162,7 +137,6 @@ if bpy is not None:
             return {'FINISHED'}
 
     class MT_OT_HelmApply(Operator):
-        """把面板值写进 XFS（导出时写回 arc）"""
         bl_idname = "mt_framework.helm_disp_apply"
         bl_label = "应用显示标志"
         bl_description = "把 disp0 / disp1 写入所有记录；导出 .arc 时生效"
@@ -175,7 +149,7 @@ if bpy is not None:
             sc = context.scene
             try:
                 new, n = write_disp(xfs, sc.MT_HelmDisp0, sc.MT_HelmDisp1)
-            except Exception as e:                      # noqa: BLE001
+            except Exception as e:
                 self.report({'ERROR'}, str(e))
                 return {'CANCELLED'}
             set_modified_xfs(context, new)
@@ -184,7 +158,6 @@ if bpy is not None:
             return {'FINISHED'}
 
     class MT_OT_HelmPreset(Operator):
-        """套用显示预设"""
         bl_idname = "mt_framework.helm_disp_preset"
         bl_label = "套用预设"
         bl_description = "按预设设置 disp0 / disp1 并写入"
@@ -211,7 +184,7 @@ if bpy is not None:
             return {'CANCELLED'}
         try:
             new, n = write_disp(xfs, disp0, disp1)
-        except Exception as e:                          # noqa: BLE001
+        except Exception as e:
             operator.report({'ERROR'}, str(e))
             return {'CANCELLED'}
         set_modified_xfs(context, new)
@@ -224,7 +197,6 @@ if bpy is not None:
         return {'FINISHED'}
 
     class MT_OT_CatHideHead(Operator):
-        """随从猫：藏掉头部（官方最常见 FFFE/FFFF）"""
         bl_idname = "mt_framework.cat_hide_head"
         bl_label = "猫·藏头"
         bl_description = "把当前 otomo arc 的 XFS 写成 FFFE/FFFF，藏掉猫的头（导出 arc 时生效）"
@@ -233,7 +205,6 @@ if bpy is not None:
             return _cat_apply(self, context, CAT_PRESETS['cat_hide1'][1], CAT_PRESETS['cat_hide1'][2])
 
     class MT_OT_CatHideHead2(Operator):
-        """随从猫：藏头 + 耳朵（FFFE/FFFD）"""
         bl_idname = "mt_framework.cat_hide_head2"
         bl_label = "猫·藏头+耳"
         bl_description = "把当前 otomo arc 的 XFS 写成 FFFE/FFFD（藏 2 件，部分头防具用这个）"
@@ -242,7 +213,6 @@ if bpy is not None:
             return _cat_apply(self, context, CAT_PRESETS['cat_hide2'][1], CAT_PRESETS['cat_hide2'][2])
 
     class MT_OT_CatShowHead(Operator):
-        """随从猫：不藏头（FFFF/FFFF）"""
         bl_idname = "mt_framework.cat_show_head"
         bl_label = "猫·不藏"
         bl_description = "把 XFS 恢复成 FFFF/FFFF（身体模型什么都不藏）"
@@ -263,10 +233,10 @@ if bpy is not None:
         for c in reversed(_classes):
             try:
                 bpy.utils.unregister_class(c)
-            except Exception:                           # noqa: BLE001
+            except Exception:
                 pass
 
-else:                                                   # pragma: no cover
+else:
     def register():
         pass
 

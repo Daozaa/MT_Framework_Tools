@@ -1,29 +1,3 @@
-# -*- coding: utf-8 -*-
-"""MHGU 物理骨骼数据（CTC / uCnsTinyChain）读写。
-
-结构（2026-10-24 逆向，见 PHYSICS_CTC.md）：
-
-    0x00  "CTC\\0"
-    0x04  u32 模型骨数
-    0x0C  u32 1000
-    0x10  u32 chain 数
-    0x14  u32 node 总数
-    0x1C  f32 1/60
-    0x50  链组参数区（单链 60 字节；多链布局未完全解析，按原始字节保留）
-    之后  每 node 96 字节：
-        +0x00 u16 骨 id, u16 flags
-        +0x04 u32 标志（0x01010001）
-        +0x08 f32 质量/关节缩放（5.0）
-        +0x0C u32 填充 0xCDCDCDCD
-        +0x10 4x4 f32 矩阵
-        +0x50 f32 角度上限
-        +0x54 f32 1.0
-        +0x58 f32 1.0
-        +0x5C u32 填充
-
-设计要点：**原样保留无法解释的字节**，只在已知偏移上改（骨 id / 矩阵 / 角度），
-保证「读进来再写出去」逐字节一致 —— 这是能安全改物理数据的前提。
-"""
 from __future__ import annotations
 
 import struct
@@ -31,7 +5,6 @@ import struct
 MAGIC = b'CTC\x00'
 HEADER_SIZE = 0x50
 NODE_SIZE = 96
-
 
 def _looks_like_node(d: bytes, off: int) -> bool:
     if off + NODE_SIZE > len(d):
@@ -41,7 +14,6 @@ def _looks_like_node(d: bytes, off: int) -> bool:
     mass = struct.unpack_from('<f', d, off + 8)[0]
     return (1 <= bid <= 40 and flags in (0, 1) and u4 in (0x01010001, 0x00010001)
             and 0.0 < mass < 1000.0)
-
 
 class CtcNode:
     __slots__ = ('offset', 'bone_id', 'flags', 'u4', 'mass', 'matrix',
@@ -74,19 +46,17 @@ class CtcNode:
         struct.pack_into('<f', b, 88, self.a3)
         return bytes(b)
 
-
 class Ctc:
     def __init__(self):
         self.raw = b''
         self.header = bytearray(HEADER_SIZE)
-        self.mid = b''            # 0x50 到第一个 node 之间的字节
-        self.tail = b''           # 最后一个 node 之后的字节
+        self.mid = b''
+        self.tail = b''
         self.nodes = []
         self.bone_count = 0
         self.chain_count = 0
         self.node_count = 0
 
-    # ---------------- 解析 ----------------
     @classmethod
     def parse(cls, data: bytes) -> 'Ctc':
         if data[:4] != MAGIC:
@@ -99,7 +69,7 @@ class Ctc:
             struct.unpack_from('<I', data, 0x10)[0],
             struct.unpack_from('<I', data, 0x14)[0],
         )
-        # 找第一个 node
+
         first = None
         for off in range(HEADER_SIZE, min(len(data) - NODE_SIZE, HEADER_SIZE + 0x200), 4):
             if _looks_like_node(data, off):
@@ -124,7 +94,6 @@ class Ctc:
         c.tail = data[off:]
         return c
 
-    # ---------------- 生成 ----------------
     def encode(self) -> bytes:
         hdr = bytearray(self.header)
         struct.pack_into('<I', hdr, 0x04, self.bone_count)
@@ -141,7 +110,6 @@ class Ctc:
     def roundtrip_ok(self):
         return self.encode() == self.raw
 
-    # ---------------- 操作 ----------------
     def set_bone_ids(self, ids):
         for node, bid in zip(self.nodes, ids):
             node.bone_id = bid
@@ -160,22 +128,15 @@ class Ctc:
                            n.angle, n.a2, n.a3, n.raw) for n in self.nodes]
         return c
 
-
 def parse_file(path):
     with open(path, 'rb') as f:
         return Ctc.parse(f.read())
-
 
 def write_file(ctc: Ctc, path):
     with open(path, 'wb') as f:
         f.write(ctc.encode())
 
 def filter_nodes(data: bytes, keep_ids) -> bytes:
-    """只保留「节点骨 id 全部在 keep_ids 里」的链组。
-
-    CTC 引用了模型里不存在的骨 → 游戏里链条会去拽一根空骨，表现为乱飞/不显示。
-    返回新的 CTC 字节（链表/节点表重排，header 的链数/节点数同步改）。
-    """
     if not data or data[:4] != MAGIC:
         return data
     keep = {int(x) for x in keep_ids}
@@ -215,14 +176,6 @@ def filter_nodes(data: bytes, keep_ids) -> bytes:
     return bytes(hdr) + b''.join(groups) + b''.join(nodes) + bytes(data[tail_start:])
 
 def check_topology(mod_bytes: bytes, ctc_bytes: bytes):
-    """检查 CTC 与 .mod 骨骼是否自洽，返回问题列表（空 = 正常）。
-
-    检查项：
-      1. 节点骨 id 是否都存在
-      2. 节点总数是否等于物理骨（id>=20）数量
-      3. 每条链内部是否满足「后一个节点的骨，父是前一个节点」
-         —— 不满足说明 CTC 是另一副骨架/另一条链搬过来的，游戏里会拽错骨。
-    """
     problems = []
     if not ctc_bytes or ctc_bytes[:4] != MAGIC:
         return ['没有 CTC']
@@ -265,8 +218,7 @@ def check_topology(mod_bytes: bytes, ctc_bytes: bytes):
             if parent.get(b) != a:
                 problems.append('链 %d 顺序不对：%d→%d，但骨 %d 的父是 %d'
                                 % (g, a, b, b, parent.get(b, 255)))
-        # 矩阵必须是正交旋转（官方 1217/1217 满足）：引擎只取其中一行当摆动轴，
-        # 缩放/剪切/镜像（det=-1）会让摆动方向歪或直接翻。
+
         for j in range(cnt):
             m = struct.unpack_from('<16f', ctc_bytes, c_off + 96 * (base + j) + 16)
             r0, r1, r2 = m[0:3], m[4:7], m[8:11]
@@ -285,13 +237,6 @@ def check_topology(mod_bytes: bytes, ctc_bytes: bytes):
     return problems
 
 def rebuild_from_bones(mod_bytes, ctc_bytes):
-    """按 .mod 里物理骨的父子链，重建 CTC 的节点表。
-
-    适用：CTC 是从别的骨架/别的链长搬来的（节点数、顺序对不上）。
-    做法：保留原 CTC 的链组参数与节点模板（矩阵/质量/角度），只按真实骨链重新排列节点：
-    每条链的节点数按骨链长度，第一个节点 flags=1（根），其余 0。
-    返回新的 CTC 字节；无法重建时返回 b''。
-    """
     if not ctc_bytes or ctc_bytes[:4] != MAGIC or not mod_bytes or mod_bytes[:4] != b'MOD\x00':
         return b''
     n = struct.unpack_from('<H', mod_bytes, 6)[0]
@@ -328,7 +273,6 @@ def rebuild_from_bones(mod_bytes, ctc_bytes):
               for g in range(n_g)]
     nodes = [ctc_bytes[c_off + 96 * k: c_off + 96 * (k + 1)] for k in range(n_c)]
 
-    # 每条链的模板节点：按原 CTC 的链组划分
     tpl_per_group, idx = [], 0
     for g in range(n_g):
         cnt = struct.unpack_from('<I', groups[g], 0)[0]
@@ -356,16 +300,7 @@ def rebuild_from_bones(mod_bytes, ctc_bytes):
     tail = ctc_bytes[c_off + 96 * n_c:]
     return bytes(hdr) + b''.join(bytes(g) for g in groups) + b''.join(out_nodes) + tail
 
-
 def set_segment_shapes(data: bytes, on=True):
-    """骨段碰撞开关：组内非链尾节点 +6=2（ShapeObject=2），链尾保持 1；
-    CTC 头 +54 = 3（开）/ 1（关）。节点 +8 半径等其它字节一律不动。
-
-    依据「外观工坊」physics.py：segment_collision 时 header[54]=3、
-    node[6]=2（链尾 1）、node[7]=1、半径保持 5.0。
-
-    返回 (新 bytes, 组数, 节点总数, 被改动的节点数)；结构不认识时原样返回。
-    """
     if not data or data[:4] != MAGIC or len(data) < 0x3C:
         return data, 0, 0, 0
     n_g = struct.unpack_from('<I', data, 0x10)[0]

@@ -1,20 +1,3 @@
-# -*- coding: utf-8 -*-
-"""FVF 对照表 (自动生成, 数据来自 3ds Max 原版插件 MT Framework.mzp 的 MTF\\i.txt)
-
-原表给每个 FVF 起了名字并标注能力:
-
-    [U1NS]    U1 = 1 组 UV 通道 (U12 = 2 组, U123 = 3 组, U1234 = 4 组)
-              N  = 含法线
-              S  = 含蒙皮 (骨骼索引 + 权重)
-    [U-201N]  另一种 UV 编码变体
-    _ow       同名变体
-
-用途: 用**可读名字**显示网格, 并知道每个 FVF 有几组 UV / 有没有蒙皮 / 有没有法线。
-注意: 原表里没有的 FVF (例如 0x0CB68015) 属于非标准格式 —— 与实测相符。
-"""
-
-#: 游戏模块索引 (原版插件 MTF\<n>.ms)
-#: FVF -> (类名, 能力标记)
 FVF_INFO = {
     0x12553032: ('Model15', 'U123N'),
     0x1273701E: ('SkinnedCharacterFace01', 'U1NS'),
@@ -95,15 +78,12 @@ FVF_INFO = {
     0xF606F017: ('SkinnedCharacter08', 'U1NS'),
 }
 
-#: 能力标记 -> FVF 列表
 FVF_BY_SIGNATURE = {}
 for _v, (_c, _s) in FVF_INFO.items():
     FVF_BY_SIGNATURE.setdefault(_s, []).append(_v)
 
 def fvf_name(fvf):
-    """FVF -> 可读名字, 未知返回带说明的十六进制串。"""
     info = FVF_INFO.get(fvf)
     if not info:
         return "0x%08X-unknown" % fvf
     return "%s_%s" % (info[0], info[1])
-

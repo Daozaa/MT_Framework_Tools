@@ -1,46 +1,17 @@
-# -*- coding: utf-8 -*-
-"""MHGU / MT Framework v160 ``.tex`` 读写 —— 贴图导入导出。
-
-格式理解来源（第三方改模 skill 包，2026-10-18 收）：
-    ref_mods/MHGU防具包/.../docs/TEX_FORMAT.md
-    ref_mods/MHGU防具包/.../tools/texwrite.py
-本文件是**独立实现**（只依赖 numpy），算法与实测常量按上述资料重写。
-
-格式要点
---------
-::
-
-    0x00 u32 magic = "TEX\\0"
-    0x04 u32 version[11:0] | unk1[23:12] | unused[27:24] | alphaFlags[31:28]
-    0x08 u32 mipCount[5:0] | width[18:6] | height[31:19]
-    0x0C u32 unk2[7:0] | format[15:8] | unk3[31:16]
-    0x10 u32 overall = 全部 mip 像素总字节
-    0x14 u32 x mipCount  各 mip 相对偏移（相对偏移表之后）
-    ...  像素数据：Switch（Tegra）block-linear / GOB swizzle
-
-支持的像素格式（实测出现过的）：0x13 DXT1 / 0x17 DXT5 / 0x19 ATI1(BC4)，
-另外 0x1F ATI2(BC5) 按同理解码。0x07 RGBA8 实测无样本，这里不做。
-
-尺寸限制：GOB 行数必须是 2 的幂，swizzle 指数 k = log2(gobs_per_col)。
-128 高 → k=2、512 → k=4、1024 → k=5、2048 → k=6，都满足；高度不是 32 的
-2 的幂倍（例如 96、320）才无法确定 k。
-"""
 from __future__ import annotations
 
 import struct
 
 import numpy as np
 
-try:                                            # 纯 Python 测试时可以没有 bpy
+try:
     import bpy
-except Exception:                               # noqa: BLE001
+except Exception:
     bpy = None
-
 
 MAGIC = 0x00584554
 VERSION_MHGU = 160
 
-#: format_id -> (名字, 块宽, 块高, 字节/块)
 FORMATS = {
     0x07: ("RGBA8", 1, 1, 4),
     0x13: ("DXT1", 4, 4, 8),
@@ -49,20 +20,15 @@ FORMATS = {
     0x1F: ("ATI2", 4, 4, 16),
 }
 
-#: 实测 73/73 样本一致的头部常量
 CONST_UNK1 = 8
 CONST_UNUSED = 0
 CONST_ALPHA_FLAGS = 2
 CONST_UNK2 = 1
 CONST_UNK3 = 1
 
-#: GOB 内部的块排列位序（实测值，见模块文档）
 GOB_PATTERNS = {16: "rcrrc", 8: "crcrrc", 4: "ccrcrrc"}
 
-
-
 class TexInfo(object):
-    """解析后的 .tex 结构。"""
 
     def __init__(self):
         self.version = 0
@@ -77,7 +43,7 @@ class TexInfo(object):
         self.mip_count = 0
         self.overall = 0
         self.header_size = 0
-        self.mips = []                          # [(w, h, bytes), ...]
+        self.mips = []
 
     @property
     def format_name(self):
@@ -88,13 +54,7 @@ class TexInfo(object):
                 % (self.width, self.height, self.format_name,
                    self.mip_count, self.overall, self.header_size))
 
-
-# ============================================================================
-# 头部
-# ============================================================================
-
 def parse_tex(data):
-    """解析 .tex 字节流，返回 :class:`TexInfo`。失败抛 ValueError。"""
     if len(data) < 20:
         raise ValueError("文件太小（%d 字节）" % len(data))
     if data[:4] != b"TEX\x00":
@@ -137,7 +97,6 @@ def parse_tex(data):
         info.mips.append((mw, mh, data[start:start + size]))
     return info
 
-
 def _pack_tex(width, height, mip_count, fmt_id, offsets, payload,
               unk1, unused, alpha_flags, unk2, unk3):
     v1 = ((VERSION_MHGU & 0xFFF) | ((unk1 & 0xFFF) << 12)
@@ -152,23 +111,16 @@ def _pack_tex(width, height, mip_count, fmt_id, offsets, payload,
     out += payload
     return bytes(out)
 
-
-# ============================================================================
-# Tegra block-linear (GOB swizzle)
-# ============================================================================
-
 def gob_dims(bytes_per_block):
     if 64 % bytes_per_block:
         raise ValueError("bytes_per_block=%d 无法整除 64" % bytes_per_block)
     return 64 // bytes_per_block, 8
-
 
 def gob_pattern(bytes_per_block):
     p = GOB_PATTERNS.get(bytes_per_block)
     if p is None:
         raise ValueError("没有 %d 字节/块 的 GOB 位序" % bytes_per_block)
     return p
-
 
 def _gob_local_index(pattern, iny, inx):
     local = np.zeros_like(iny)
@@ -182,7 +134,6 @@ def _gob_local_index(pattern, iny, inx):
             ci += 1
     return local
 
-
 def padded_block_dims(w, h, bw, bh, bpb):
     gw, gh = gob_dims(bpb)
     bx = max(1, (w + bw - 1) // bw)
@@ -191,20 +142,12 @@ def padded_block_dims(w, h, bw, bh, bpb):
     by = (by + gh - 1) // gh * gh
     return bx, by
 
-
 def swizzle_k_for(padded_blocks_y):
-    """每列 GOB 数 -> swizzle 交错位数 k。
-
-    ★ k 上限是 4（= 每列最多 16 个 GOB 参与交错）。
-    实测：2048×2048 DXT5 的原版/Kukkii 文件用 k=4；插件旧公式给出 k=6，
-    导致 1024/2048 贴图进游戏后整张错位（512 及以下看不出来，因为 k<=4）。
-    """
     gobs_per_col = max(1, padded_blocks_y // 8)
     k = gobs_per_col.bit_length() - 1
     if (1 << k) != gobs_per_col:
         raise ValueError("GOB 行数 %d 不是 2 的幂（高度不合规）" % gobs_per_col)
     return min(k, 4)
-
 
 def _gob_index_table(padded_bx, padded_by, bpb, k):
     gw, gh = gob_dims(bpb)
@@ -230,13 +173,7 @@ def _gob_index_table(padded_bx, padded_by, bpb, k):
         raise ValueError("GOB 索引越界")
     return idx
 
-
 def deswizzle_mip(raw, w, h, bw, bh, bpb, k=None, full=False):
-    """原始字节 -> (块行, 块列, bpb) uint8。
-
-    ``full=False`` 只返回实际覆盖的块（忽略 padding）；``full=True`` 返回
-    补齐后的整块网格（用于「原样重组」——padding 区可能不是 0）。
-    """
     pbx, pby = padded_block_dims(w, h, bw, bh, bpb)
     need = pbx * pby * bpb
     if len(raw) < need:
@@ -252,9 +189,7 @@ def deswizzle_mip(raw, w, h, bw, bh, bpb, k=None, full=False):
     by = (h + bh - 1) // bh
     return out[:by, :bx, :]
 
-
 def swizzle_mip(blocks, w, h, bw, bh, bpb, k=None):
-    """(块行, 块列, bpb) -> swizzled 字节流（长度 = 补齐后块数 × bpb）。"""
     pbx, pby = padded_block_dims(w, h, bw, bh, bpb)
     if k is None:
         k = swizzle_k_for(pby)
@@ -266,11 +201,6 @@ def swizzle_mip(blocks, w, h, bw, bh, bpb, k=None):
     out[idx.reshape(-1)] = buf.reshape(pbx * pby, bpb)
     return out.tobytes()
 
-
-# ============================================================================
-# 块解码
-# ============================================================================
-
 def _rgb565_to_rgb(c):
     r = (c >> 11) & 0x1F
     g = (c >> 5) & 0x3F
@@ -280,7 +210,6 @@ def _rgb565_to_rgb(c):
     b = (b << 3) | (b >> 2)
     return np.stack([r, g, b], axis=1).astype(np.int32)
 
-
 def _unpack_index(bits, n, nbits, count, shift_step=None):
     out = np.zeros((n, count), dtype=np.int32)
     mask = (1 << nbits) - 1
@@ -288,7 +217,6 @@ def _unpack_index(bits, n, nbits, count, shift_step=None):
     for p in range(count):
         out[:, p] = (bits >> (step * p)) & mask
     return out
-
 
 def _bc1_colour_blocks(blocks):
     n = blocks.shape[0]
@@ -312,7 +240,6 @@ def _bc1_colour_blocks(blocks):
     transparent = (~gt)[:, None] & (idx == 3)
     rgba[:, :, 3] = np.where(transparent, 0, 255)
     return rgba
-
 
 def _bc4_channel_blocks(blocks):
     n = blocks.shape[0]
@@ -338,15 +265,12 @@ def _bc4_channel_blocks(blocks):
         pal[:, i] = np.where(gt, v8, v6)
     return pal[np.arange(n)[:, None], idx].astype(np.uint8)
 
-
 def _finish(a, w, h):
     by_n, bx_n, bh, bw, ch = a.shape
     img = a.transpose(0, 2, 1, 3, 4).reshape(by_n * bh, bx_n * bw, ch)
     return img[:h, :w]
 
-
 def decode_blocks(blocks, fmt_id, w, h):
-    """(块行, 块列, bpb) -> (h, w, 4) uint8 RGBA。"""
     name, bw, bh, bpb = FORMATS[fmt_id]
     by_n, bx_n = blocks.shape[0], blocks.shape[1]
     flat = blocks.reshape(by_n * bx_n, bpb)
@@ -376,20 +300,13 @@ def decode_blocks(blocks, fmt_id, w, h):
 
     return _finish(v.reshape(by_n, bx_n, bh, bw, 4), w, h)
 
-
 def decode_mip(info, index=0):
-    """解码指定 mip，返回 (h, w, 4) uint8。"""
     mw, mh, raw = info.mips[index]
     name, bw, bh, bpb = FORMATS[info.format_id]
     blocks = deswizzle_mip(raw, mw, mh, bw, bh, bpb)
     return decode_blocks(blocks, info.format_id, mw, mh)
 
-
 def rebuild_raw(info):
-    """不改像素、只用已有块重新组装 —— 对真实样本应与原文件逐字节相同。
-
-    padding 区**原样保留**（实测小 mip 的 padding 不是 0，清零会破坏逐字节一致）。
-    """
     name, bw, bh, bpb = FORMATS[info.format_id]
     payload = bytearray()
     offsets = []
@@ -401,11 +318,6 @@ def rebuild_raw(info):
                      offsets, bytes(payload), info.unk1, info.unused,
                      info.alpha_flags, info.unk2, info.unk3)
 
-
-# ============================================================================
-# 块编码
-# ============================================================================
-
 def _rgb565(px):
     r = np.clip(px[:, 0].astype(np.int32), 0, 255)
     g = np.clip(px[:, 1].astype(np.int32), 0, 255)
@@ -413,9 +325,7 @@ def _rgb565(px):
     return (((r * 31 + 127) // 255) << 11) | (((g * 63 + 127) // 255) << 5) \
         | ((b * 31 + 127) // 255)
 
-
 def _blockify(rgba, bw, bh):
-    """(h,w,4) -> (块行, 块列, bh, bw, 4)，右侧/底部用边缘像素补齐。"""
     h, w = rgba.shape[:2]
     by = (h + bh - 1) // bh
     bx = (w + bw - 1) // bw
@@ -429,9 +339,7 @@ def _blockify(rgba, bw, bh):
         pad[h:, w:] = pad[h - 1:h, w - 1:w]
     return pad.reshape(by, bh, bx, bw, rgba.shape[2]).transpose(0, 2, 1, 3, 4), by, bx
 
-
 def _principal_axis(px):
-    """(n,16,3) -> 每块的主方向单位向量 (n,3)。"""
     d = px - px.mean(axis=1, keepdims=True)
     cov = np.einsum('npi,npj->nij', d, d)
     v = np.ones((px.shape[0], 3), dtype=np.float32) / np.sqrt(3.0)
@@ -442,9 +350,7 @@ def _principal_axis(px):
         v = v / norm
     return v, d
 
-
 def _encode_bc1_blocks(px):
-    """(n,16,3) uint8 -> (n,8) uint8 BC1 块。"""
     n = px.shape[0]
     pf = px.astype(np.float32)
     v, d = _principal_axis(pf)
@@ -473,7 +379,7 @@ def _encode_bc1_blocks(px):
 
     diff = px.astype(np.int32)[:, :, None, :] - pal[:, None, :, :]
     dist = np.einsum('npck,npck->npc', diff, diff)
-    idx = dist.argmin(axis=2).astype(np.uint32)          # (n,16)
+    idx = dist.argmin(axis=2).astype(np.uint32)
 
     bits = np.zeros(n, dtype=np.uint32)
     for p in range(16):
@@ -488,9 +394,7 @@ def _encode_bc1_blocks(px):
         out[:, 4 + i] = (bits >> (8 * i)) & 0xFF
     return out
 
-
 def _encode_bc4_blocks(vals):
-    """(n,16) uint8 -> (n,8) uint8 BC4 块（8 值模式，a0 > a1）。"""
     n = vals.shape[0]
     a0 = vals.max(axis=1).astype(np.int32)
     a1 = vals.min(axis=1).astype(np.int32)
@@ -505,7 +409,7 @@ def _encode_bc4_blocks(vals):
         pal[:, i] = ((8 - i) * a0 + (i - 1) * a1 + 3) // 7
 
     diff = np.abs(vals.astype(np.int32)[:, :, None] - pal[:, None, :])
-    idx = diff.argmin(axis=2).astype(np.int64)            # (n,16)
+    idx = diff.argmin(axis=2).astype(np.int64)
 
     bits = np.zeros(n, dtype=np.int64)
     for p in range(16):
@@ -518,9 +422,7 @@ def _encode_bc4_blocks(vals):
         out[:, 2 + i] = (bits >> (8 * i)) & 0xFF
     return out
 
-
 def encode_blocks(rgba, fmt_id):
-    """(h,w,4) uint8 -> (块行, 块列, bpb) uint8。"""
     name, bw, bh, bpb = FORMATS[fmt_id]
     blk, by, bx = _blockify(rgba, bw, bh)
     flat = blk.reshape(by, bx, 16, 4)
@@ -543,13 +445,7 @@ def encode_blocks(rgba, fmt_id):
         raise ValueError("不支持写入的格式 0x%02X" % fmt_id)
     return out.reshape(by, bx, bpb)
 
-
-# ============================================================================
-# 缩放 / mip
-# ============================================================================
-
 def resize_rgba(rgba, w, h):
-    """双线性缩放到 (h,w)。够用即可，不追求与 Pillow LANCZOS 一致。"""
     src_h, src_w = rgba.shape[:2]
     if (src_w, src_h) == (w, h):
         return rgba
@@ -569,9 +465,7 @@ def resize_rgba(rgba, w, h):
     out = top * (1 - fy) + bot * fy
     return np.clip(out + 0.5, 0, 255).astype(np.uint8)
 
-
 def _downsample(rgba):
-    """2×2 盒式平均降采样，宽高任何一个是 1 都能处理。"""
     h, w = rgba.shape[:2]
     if h <= 1 and w <= 1:
         return rgba.copy()
@@ -588,20 +482,16 @@ def _downsample(rgba):
     a = a.reshape(nh, 2, nw, 2, -1).mean(axis=(1, 3))
     return np.clip(a + 0.5, 0, 255).astype(np.uint8)
 
-
 def _build_mips(rgba, count):
     out = [rgba]
     for _ in range(1, count):
         out.append(_downsample(out[-1]))
     return out
 
-
 def max_mip_count(w, h):
     return int(max(w, h)).bit_length()
 
-
 def encode_tex(rgba, fmt_id=0x17, mip_count=None, **hdr):
-    """从零编码一张贴图。"""
     h, w = rgba.shape[:2]
     name, bw, bh, bpb = FORMATS[fmt_id]
     if w % bw or h % bh:
@@ -623,12 +513,7 @@ def encode_tex(rgba, fmt_id=0x17, mip_count=None, **hdr):
                      hdr.get('alpha_flags', CONST_ALPHA_FLAGS),
                      hdr.get('unk2', CONST_UNK2), hdr.get('unk3', CONST_UNK3))
 
-
 def encode_like(template, rgba):
-    """沿用模板的结构（尺寸 / 格式 / mip 数 / 头部常量），只换像素。
-
-    ``template`` 可以是 .tex 字节或 :class:`TexInfo`。尺寸不一致时自动缩放。
-    """
     info = template if isinstance(template, TexInfo) else parse_tex(template)
     name, bw, bh, bpb = FORMATS[info.format_id]
     rgba = resize_rgba(rgba, info.width, info.height)
@@ -646,18 +531,7 @@ def encode_like(template, rgba):
                      offsets, bytes(payload), info.unk1, info.unused,
                      info.alpha_flags, info.unk2, info.unk3)
 
-
-# ============================================================================
-# Blender 胶水
-# ============================================================================
-
 def rgba_to_image(rgba, name, colorspace=None):
-    """(h,w,4) uint8 -> bpy Image（Blender 的 pixels 是自下而上）。
-
-    ⚠️ ``colorspace`` 必须在**写入像素之前**设。实测：先写像素再改
-    ``colorspace_settings.name``，Blender 会就地转换整张缓冲，数据直接坏掉
-    （maxdiff 255）。
-    """
     if bpy is None:
         raise RuntimeError("没有 bpy")
     h, w = rgba.shape[:2]
@@ -672,23 +546,14 @@ def rgba_to_image(rgba, name, colorspace=None):
     img.update()
     return img
 
-
 def _is_srgb_space(img):
     try:
         cs = (img.colorspace_settings.name or '').strip().lower()
-    except Exception:                                   # noqa: BLE001
+    except Exception:
         return False
     return cs == 'srgb' or cs.startswith('srgb') or cs == 'filmic srgb'
 
-
 def image_to_rgba(img):
-    """bpy Image -> (h,w,4) uint8。
-
-    ⚠️ **浮点图**（16 位 PNG、EXR、32 位/通道）的 img.pixels 是**线性**值，
-    直接 ×255 会整体变暗（实测 sRGB 138 → 67、64 → 14，白色不变）。
-    这类图要先编码回 sRGB 再取字节；8 位图（is_float=False）的 pixels
-    本身就是 sRGB 原值，不能转，否则会变亮。
-    """
     if bpy is None:
         raise RuntimeError("没有 bpy")
     w, h = img.size
@@ -701,16 +566,11 @@ def image_to_rgba(img):
                               1.055 * np.power(rgb, 1.0 / 2.4) - 0.055)
     return np.clip(a * 255.0 + 0.5, 0, 255).astype(np.uint8)
 
-
-# ============================================================================
-# 操作符 / UI
-# ============================================================================
-
 if bpy is not None:
 
     from bpy.props import (BoolProperty, EnumProperty, PointerProperty,
-                           StringProperty)                       # noqa: E402
-    from bpy.types import Operator                                # noqa: E402
+                           StringProperty)
+    from bpy.types import Operator
 
     _SIZES = [('AUTO', "原图", "跟图片一样大（自动取 4 的倍数）"),
               ('128', "128", "缩放到最大边 128"),
@@ -736,7 +596,6 @@ if bpy is not None:
         return w, h
 
     class MT_OT_ImportTex(Operator):
-        """把 .tex 解码成 Blender 图像"""
         bl_idname = "mt_framework.import_tex"
         bl_label = "导入 .tex"
         bl_options = {'REGISTER', 'UNDO'}
@@ -766,7 +625,7 @@ if bpy is not None:
                 scene.MT_TexImage = img
                 self.report({'INFO'}, "已导入 %s（%s，mip %d）"
                             % (name, info.format_name, info.mip_count))
-            except Exception as e:                       # noqa: BLE001
+            except Exception as e:
                 self.report({'ERROR'}, "导入失败: %s" % e)
                 return {'CANCELLED'}
             return {'FINISHED'}
@@ -776,7 +635,6 @@ if bpy is not None:
             return {'RUNNING_MODAL'}
 
     class MT_OT_ExportTex(Operator):
-        """把选定的图片编码成 .tex"""
         bl_idname = "mt_framework.export_tex"
         bl_label = "导出 .tex"
         bl_options = {'REGISTER'}
@@ -803,9 +661,7 @@ if bpy is not None:
             return None
 
         def invoke(self, context, event):
-            # ★ 1.2.191：以前这里没有 invoke，面板按钮会直接 execute，
-            #   沿用上一次的 filepath —— 第二张图不弹对话框，直接按第一张的名字覆盖。
-            #   现在每次都弹，并预填「当前图片名.tex」（后缀不用手打）。
+
             img = self._pick_image(context)
             base = 'texture'
             if img is not None:
@@ -867,7 +723,7 @@ if bpy is not None:
                             % (path.replace('\\', '/').rsplit('/', 1)[-1],
                                out.width, out.height, out.format_name,
                                out.mip_count, len(blob)))
-            except Exception as e:                       # noqa: BLE001
+            except Exception as e:
                 self.report({'ERROR'}, "导出失败: %s" % e)
                 return {'CANCELLED'}
             return {'FINISHED'}
@@ -906,7 +762,7 @@ if bpy is not None:
             except Exception:
                 pass
 
-else:                                               # pragma: no cover
+else:
     def register():
         pass
 

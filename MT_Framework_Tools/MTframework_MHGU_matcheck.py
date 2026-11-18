@@ -1,22 +1,3 @@
-# -*- coding: utf-8 -*-
-"""材质链接检查：`.mod` 里的材质名 ↔ `.mrl` 的材质条目。
-
-为什么需要（依据 + 本地实测）：
-
-  * `.mod` (v0xD4) 头部：`0x0A` = 材质数，`0x2C` = 材质名数组偏移，每条 128 字节；
-    每个 mesh 头的 `data0` 里 bits 12-23 = 它用的材质下标。
-  * `.mrl` 每个材质条目 `+0x04` = **crc32(材质名) ^ 0xFFFFFFFF**。
-  * 两边**对不上** ⇒ 网格拿不到材质 ⇒ **游戏里整个网格不绘制**（"模型不显示"的
-    两大原因之一，另一条是 meshtype 不对）。
-
-实测（`weapon\w00\180.arc`）：
-
-    XfB__E0__m00_two180_env02_  → 0x418A751B = mat0 ✓
-    XfBA__m00_two180_emiA00_    → 0x8449336A = mat1 ✓
-    XfB__E0__m00_two180_env01_  → 0x6AA726D8 = mat2 ✓
-
-本模块只读不写，纯 Python，不依赖 bpy。
-"""
 from __future__ import annotations
 
 import struct
@@ -25,16 +6,12 @@ import zlib
 MOD_MAGIC = b'MOD\x00'
 MRL_MAGIC = b'MRL\x00'
 NAME_SZ = 128
-SUPPORTED_MOD_VER = 0xD4          # MHGU / Switch
-
+SUPPORTED_MOD_VER = 0xD4
 
 def name_hash(name):
-    """MRL 用的材质名哈希：反射 CRC32、初值 0xFFFFFFFF、无终值异或。"""
     return (zlib.crc32(name.encode('ascii', 'replace')) ^ 0xFFFFFFFF) & 0xFFFFFFFF
 
-
 def read_mod_materials(mod_bytes):
-    """返回 dict(version, names, mesh_mats) 或 None（不支持的版本）。"""
     if len(mod_bytes) < 0x40 or mod_bytes[:4] != MOD_MAGIC:
         return None
     ver = struct.unpack_from('<h', mod_bytes, 4)[0] & 0xFFFF
@@ -58,7 +35,6 @@ def read_mod_materials(mod_bytes):
         mesh_mats.append((d0 >> 12) & 0xFFF)
     return dict(version=ver, names=names, mesh_mats=mesh_mats)
 
-
 def read_mrl_hashes(mrl_bytes):
     if len(mrl_bytes) < 0x1C or mrl_bytes[:4] != MRL_MAGIC:
         return set()
@@ -72,9 +48,7 @@ def read_mrl_hashes(mrl_bytes):
         out.add(struct.unpack_from('<I', mrl_bytes, o + 4)[0])
     return out
 
-
 def check(mod_bytes, mrl_bytes):
-    """返回 dict(rows, missing, dead_meshes)，mod 版本不支持时返回 None。"""
     info = read_mod_materials(mod_bytes)
     if info is None:
         return None
@@ -89,9 +63,7 @@ def check(mod_bytes, mrl_bytes):
     return dict(version=info['version'], rows=rows, missing=missing,
                 dead_meshes=dead, mesh_mats=info['mesh_mats'])
 
-
 def describe(result, max_names=4):
-    """把结果压成一句人话，给 operator.report 用。"""
     if result is None:
         return '这个 .mod 不是 MHGU(v0xD4) 格式，跳过材质名检查'
     if not result['missing']:
@@ -103,19 +75,15 @@ def describe(result, max_names=4):
     return ('材质名在 mrl 里找不到 —— 这些网格游戏里不会显示: %s%s%s'
             % ('、'.join(names), more, tail))
 
-
-# ---------------------------------------------------------------- bpy
 try:
     import bpy
     from bpy.types import Operator
-except Exception:                                       # noqa: BLE001
+except Exception:
     bpy = None
-
 
 if bpy is not None:
 
     def _find_template(context):
-        """当前模板 .mod 路径（导入时记下的那个）。"""
         import os as _os
         sc = getattr(context, "scene", context)
         cand = sc.get("MT_LastImportPath", "") or ""
@@ -125,12 +93,11 @@ if bpy is not None:
             from .MTframework_MHGU_import import _last_import_path
             if _last_import_path and _os.path.exists(_last_import_path):
                 return _last_import_path
-        except Exception:                               # noqa: BLE001
+        except Exception:
             pass
         return ""
 
     def _current_pair(context):
-        """当前模板 .mod 与 arc 里的 .mrl 字节。"""
         import os
         mod_bytes = b''
         p = _find_template(context)
@@ -138,7 +105,7 @@ if bpy is not None:
             try:
                 with open(p, 'rb') as f:
                     mod_bytes = f.read()
-            except Exception:                           # noqa: BLE001
+            except Exception:
                 mod_bytes = b''
         mrl_bytes = b''
         arc = ''
@@ -151,12 +118,11 @@ if bpy is not None:
                 e = find_entry(es, MRL_MAGIC)
                 if e is not None:
                     mrl_bytes = e['body']
-        except Exception:                               # noqa: BLE001
+        except Exception:
             mrl_bytes = b''
         return mod_bytes, mrl_bytes, arc
 
     class MT_OT_MatCheck(Operator):
-        """检查当前模型的材质名能不能在 arc 的 mrl 里找到"""
         bl_idname = "mt_framework.mat_check"
         bl_label = "材质链接检查"
         bl_description = ("读当前模板 .mod 的材质名，算 crc32^~0，在 arc 的 .mrl 里查；"
@@ -191,10 +157,10 @@ if bpy is not None:
     def unregister():
         try:
             bpy.utils.unregister_class(MT_OT_MatCheck)
-        except Exception:                               # noqa: BLE001
+        except Exception:
             pass
 
-else:                                                   # pragma: no cover
+else:
     def register():
         pass
 

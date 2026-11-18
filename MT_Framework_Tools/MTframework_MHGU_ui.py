@@ -1,16 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-MT Framework MHGU - Blender UI 面板
-====================================
-对应原始 3ds Max 脚本的 ReHDModTool rollout (lines 405-6025)
-
-包含:
-- 导入/导出操作符 (MOD, SBC, ADR, EMS)
-- 网格过滤工具 (LOD, MatID, FVF 过滤)
-- 网格重命名工具
-- 游戏修复选项
-"""
-
 import bpy
 import os
 import struct
@@ -20,23 +7,9 @@ from bpy.props import (
 )
 from bpy.types import Operator, Panel
 
-# 标准 helm XFS（1097B，藏猎人原版头/头发；所有已验收 helm 的 XFS 逐字节相同）
-# 跨部位导出到 helm 时自动补上，否则「头盔显示」和藏头功能都没法用。
 _BMT_XFS_B64 = "WEZTABAAAQAiAAAAAAAAAAMAAACEAQAADAAAAIwAAADkAAAA0p7IZgMAAAA8AQAABgEEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQEAAAaRBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE4BAAABAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABBTRNxAgAAAFcBAAADAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABjAQAAAqAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAG+UfcgIAAABrAQAABQACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAdgEAAAUAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEluZm9UeXBlAG1RdWFsaXR5AEluZm9MaXN0AG1BdXRvRGVsZXRlAG1wQXJyYXkAbURpc3BGbGFnMABtRGlzcEZsYWcxAAAAAAEAAACpAgAAAQAAAAAAAAABAAAAAgAAAAEAAAADAAEAjQIAAAEAAAAAIAAAAAUAAgAQAAAAAQAAAAD8AQAAAP+BBQADABAAAAABAAAAAPwBAAAA/4EFAAQAEAAAAAEAAAAA/AEAAAD/gQUABQAQAAAAAQAAAAD8AQAAAP+BBQAGABAAAAABAAAAAPwBAAAA/4EFAAcAEAAAAAEAAAAA/AEAAAD/gQUACAAQAAAAAQAAAAD8AQAAAP+BBQAJABAAAAABAAAAAPwBAAAA/4EFAAoAEAAAAAEAAAAA/AEAAAD/gQUACwAQAAAAAQAAAAD8AQAAAP+BBQAMABAAAAABAAAAAPwBAAAA/4EFAA0AEAAAAAEAAAAA/AEAAAD/gQUADgAQAAAAAQAAAAD8AQAAAP+BBQAPABAAAAABAAAAAPwBAAAA/4EFABAAEAAAAAEAAAAA/AEAAAD/gQUAEQAQAAAAAQAAAAD8AQAAAP+BBQASABAAAAABAAAAAPwBAAAA/4EFABMAEAAAAAEAAAAA/AEAAAD/gQUAFAAQAAAAAQAAAAD8AQAAAP+BBQAVABAAAAABAAAAAPwBAAAA/4EFABYAEAAAAAEAAAAA/AEAAAD/gQUAFwAQAAAAAQAAAAD8AQAAAP+BBQAYABAAAAABAAAAAPwBAAAA/4EFABkAEAAAAAEAAAAA/AEAAAD/gQUAGgAQAAAAAQAAAAD8AQAAAP+BBQAbABAAAAABAAAAAPwBAAAA/4EFABwAEAAAAAEAAAAA/AEAAAD/gQUAHQAQAAAAAQAAAAD8AQAAAP+BBQAeABAAAAABAAAAAPwBAAAA/4EFAB8AEAAAAAEAAAAA/AEAAAD/gQUAIAAQAAAAAQAAAAD8AQAAAP+BBQAhABAAAAABAAAAAPwBAAAA/4E="
 
-# ============================================================
-# 全局状态变量 (对应原始脚本的全局变量)
-# ============================================================
-# 这些变量在 MTframework_MHGU.py 中定义
-# 我们在这里通过场景自定义属性来存储 UI 状态
-
 def parse_mesh_name(obj_name):
-    """从网格对象名解析 (index, fvf, lod, matid, group, display, type).
-
-    名称格式:
-        Mesh_<index>_<FVF>_LODx<lod>_MatID:<mat>_Group:<grp>_DisplayMode:<mode>_Type:<type>
-    解析失败返回 None.
-    """
     sName = obj_name.split("_")
     if len(sName) < 8 or not obj_name.startswith("Mesh_"):
         return None
@@ -57,10 +30,6 @@ def parse_mesh_name(obj_name):
         return None
 
 def update_mesh_filter(self, context):
-    """
-    更新网格过滤 (隐藏/显示)
-    对应原始脚本 chkhl, chkh, ddMat, ddFVF, ddlod 的回调
-    """
     props = context.scene.MT_Framework_Props
 
     hidelod0 = props.hide_lod0
@@ -76,23 +45,18 @@ def update_mesh_filter(self, context):
 
         hide_obj = False
 
-        # LOD 0 隐藏
         if hidelod0 and info["lod"] == "0":
             hide_obj = True
 
-        # 退化线隐藏 (type == 4128)
         if hidedege and info["type"] == 4128:
             hide_obj = True
 
-        # LOD 过滤
         if props.filter_lod != "All" and info["lod"] != props.filter_lod:
             hide_obj = True
 
-        # MatID 过滤
         if props.filter_mat != "All" and info["matid"] != props.filter_mat:
             hide_obj = True
 
-        # FVF 过滤
         if props.filter_fvf != "All" and info["fvf"] != props.filter_fvf:
             hide_obj = True
 
@@ -100,19 +64,15 @@ def update_mesh_filter(self, context):
         obj.hide_viewport = hide_obj
 
 def update_lod_dropdown(self, context):
-    """更新 LOD 下拉列表"""
     update_mesh_filter(self, context)
 
 def update_mat_dropdown(self, context):
-    """更新 MatID 下拉列表"""
     update_mesh_filter(self, context)
 
 def update_fvf_dropdown(self, context):
-    """更新 FVF 下拉列表"""
     update_mesh_filter(self, context)
 
 def collect_filter_values():
-    """从场景中所有 Mesh_* 对象收集 (lods, mats, fvfs)."""
     lods, mats, fvfs = set(), set(), set()
     for obj in bpy.data.objects:
         if obj.type != 'MESH' or not obj.name.startswith("Mesh_"):
@@ -129,7 +89,6 @@ def _sorted_numeric(values):
     return sorted(values, key=lambda x: int(x) if x.lstrip('-').isdigit() else 0)
 
 def lod_items_cb(self, context):
-    """LOD 下拉列表 (动态)."""
     lods, _, _ = collect_filter_values()
     items = [("All", "All", "显示所有 LOD")]
     for lod in _sorted_numeric(lods):
@@ -137,7 +96,6 @@ def lod_items_cb(self, context):
     return items
 
 def mat_items_cb(self, context):
-    """材质 ID 下拉列表 (动态)."""
     _, mats, _ = collect_filter_values()
     items = [("All", "All", "显示所有材质")]
     for mat in _sorted_numeric(mats):
@@ -145,7 +103,6 @@ def mat_items_cb(self, context):
     return items
 
 def fvf_items_cb(self, context):
-    """FVF 下拉列表 (动态)."""
     _, _, fvfs = collect_filter_values()
     items = [("All", "All", "显示所有 FVF")]
     for fvf in sorted(fvfs):
@@ -153,26 +110,14 @@ def fvf_items_cb(self, context):
     return items
 
 def refresh_filter_lists(self, context):
-    """
-    刷新过滤下拉列表.
-
-    下拉项现在由 lod_items_cb / mat_items_cb / fvf_items_cb 动态生成,
-    这里只负责把当前选择重置为 "All" 并重新应用过滤.
-    """
     props = context.scene.MT_Framework_Props
     lods, mats, fvfs = collect_filter_values()
     print("过滤列表: LOD={} MatID={} FVF={}".format(
         _sorted_numeric(lods), _sorted_numeric(mats), sorted(fvfs)))
     update_mesh_filter(self, context)
 
-# ============================================================
-# 场景属性组
-# ============================================================
-
 class MTFrameworkProperties(bpy.types.PropertyGroup):
-    """MTFramework Tools 的场景属性"""
 
-    # 游戏格式: 固定 MHGU, 不在界面里选 (内部保留, 供导入/导出调用)
     game_fix: EnumProperty(
         name="游戏修复",
         description="固定为 MHGU",
@@ -187,7 +132,6 @@ class MTFrameworkProperties(bpy.types.PropertyGroup):
         default='mhgu',
     )
 
-    # 导入后自动居中 (便于与第三方模型对齐)
     auto_center: EnumProperty(
         name="导入后居中",
         description="导入完成后自动把模型平移, 便于与第三方模型 (例如 MMD) 对齐。"
@@ -201,7 +145,6 @@ class MTFrameworkProperties(bpy.types.PropertyGroup):
         default='XY_GROUND',
     )
 
-    # 导出时把所有分件都写成可见件（0xEFFF）
     all_visible: BoolProperty(
         name="所有分件都可见 (0xEFFF)",
         description="导出时把每个网格的 meshtype 都改成 0xEFFF（可见主件）。"
@@ -210,7 +153,6 @@ class MTFrameworkProperties(bpy.types.PropertyGroup):
         default=False,
     )
 
-    # 对称骨骼命名 (.l / .r)
     sym_bone_names: BoolProperty(
         name="骨骼对称命名 (.l / .r)",
         description="把镜像成对的骨骼与顶点组改名为 <基础名>.l / .r, 方便使用 "
@@ -219,46 +161,41 @@ class MTFrameworkProperties(bpy.types.PropertyGroup):
         default=True,
     )
 
-    # 说明: 导出时固定翻转面朝向, 不再提供开关 (见 export 模块里的注释)。
-    
-    # 过滤选项
     hide_lod0: BoolProperty(
         name="隐藏 LOD 0",
         description="隐藏 LOD 0 级别的网格",
         default=False,
         update=update_mesh_filter,
     )
-    
+
     hide_degen: BoolProperty(
         name="隐藏退化线",
         description="隐藏退化线模型 (Type 4128)",
         default=False,
         update=update_mesh_filter,
     )
-    
-    # 过滤下拉列表 (动态从场景中的 Mesh_* 对象收集)
+
     filter_lod: EnumProperty(
         name="LOD 级别",
         description="按 LOD 级别过滤网格",
         items=lod_items_cb,
         update=update_lod_dropdown,
     )
-    
+
     filter_mat: EnumProperty(
         name="材质 ID",
         description="按材质 ID 过滤网格",
         items=mat_items_cb,
         update=update_mat_dropdown,
     )
-    
+
     filter_fvf: EnumProperty(
         name="顶点格式",
         description="按 FVF 顶点格式过滤网格",
         items=fvf_items_cb,
         update=update_fvf_dropdown,
     )
-    
-    # 重命名工具
+
     rename_mode: EnumProperty(
         name="替换模式",
         description="选择要替换的网格名称组件",
@@ -270,14 +207,13 @@ class MTFrameworkProperties(bpy.types.PropertyGroup):
         ],
         default='LOD',
     )
-    
+
     rename_value: StringProperty(
         name="新值",
         description="输入新的值",
         default="0",
     )
-    
-    # 导出时合并位置重合顶点的法线 (消除 UV 接缝处的光影断层)
+
     strict_phys: BoolProperty(
         name="严格物理校验（不一致就阻止导出）",
         description="物理骨与 CTC/模板不一致时：关=只警告并继续，开=阻止导出",
@@ -298,10 +234,6 @@ class MTFrameworkProperties(bpy.types.PropertyGroup):
         default=False,
     )
 
-# ============================================================
-# 操作符 (Operators)
-# ============================================================
-    # 跨部位移植（body -> arm/wst/leg/helm）
     MT_TransplantKeepCtc: BoolProperty(
         name="保留物理 CTC", default=True,
         description="把 body 的物理链一起复制到目标部位")
@@ -309,15 +241,13 @@ class MTFrameworkProperties(bpy.types.PropertyGroup):
         name="输出目录", subtype='DIR_PATH', default="",
         description="留空 = 输出到当前 arc 所在目录")
 
-
 class MT_OT_ImportMod(Operator):
-    """导入 .mod 文件 (MHGU / Switch)"""
     bl_idname = "mt_framework.import_mod"
     bl_label = "导入 MOD"
     bl_description = "导入 .mod (MHGU / Switch)"
-    
+
     filepath: StringProperty(subtype='FILE_PATH')
-    # 文件浏览器只显示 .mod（导出产物是 .mod.new，也一并显示，方便回导验证）
+
     filter_glob: StringProperty(default="*.mod;*.new;*.arc", options={'HIDDEN'})
 
     def execute(self, context):
@@ -328,7 +258,7 @@ class MT_OT_ImportMod(Operator):
         if not _apply(self, context, self.filepath):
             return {'CANCELLED'}
         refresh_filter_lists(self, context)
-        # 新模型：清掉上一个模型遗留的材质改动，避免写进新 arc
+
         try:
             context.scene['MT_ArcXfs'] = ''
             context.scene['MT_MeshMats'] = ''
@@ -336,13 +266,12 @@ class MT_OT_ImportMod(Operator):
             pass
 
         return {'FINISHED'}
-    
+
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
 class MT_OT_ExportMod(Operator):
-    """导出 .mod 文件 (不覆盖原文件, 生成 .mod.new)"""
     bl_idname = "mt_framework.export_mod"
     bl_label = "导出 MOD"
     bl_description = "导出 .mod；若导入的是 .arc，会同时重建 .arc.new（可直接改名为 .arc 装机）"
@@ -372,24 +301,12 @@ class MT_OT_ExportMod(Operator):
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
-# 剪贴板存储顶点组名称
 _clipboard_vgroups = []
 
-# meshtype: .mod 分件的**类型**标记, 不是"主体"标记。
-#   61439 (0xEFFF) = 可见的防具/模型件
-#   58560 (0xE4C0) = 全身低模 (顶点极少但横跨全身, 疑似影子/内衬)
-#   0 / 32 / 4128  = 辅助 / 退化件
 def is_gu_mesh(obj):
-    """判断是不是插件从 .mod 导入的网格 (名字里有 Type:NNNN 段)。"""
     return any(p.startswith('Type:') for p in obj.name.split('_'))
 
 def pick_replace_pair(context):
-    """从选中的物体里分出 (你的模型, 被替换的目标)。
-
-    规则故意做得简单粗暴:
-      * 选中两个网格  -> 一个是 .mod 分件就当目标, 另一个当你的模型
-      * 认不出来      -> 活动物体 = 你的模型, 另一个 = 目标
-    """
     sel = [o for o in context.selected_objects if o.type == 'MESH']
     act = context.active_object
     if act is not None and act.type == 'MESH' and act not in sel:
@@ -402,13 +319,11 @@ def pick_replace_pair(context):
     if len(gu) == 1 and len(mine) == 1:
         return mine[0], gu[0]
 
-    # 认不出来就按"活动物体是你的模型"来分
     new = act if (act is not None and act in sel) else sel[0]
     rest = [o for o in sel if o is not new]
     return new, (rest[0] if rest else None)
 
 class MT_OT_ReplaceMainBody(Operator):
-    """把目标的名称与数据块名称换到你的模型上"""
 
     bl_idname = "mt_framework.replace_main_body"
     bl_label = "替换名称"
@@ -428,9 +343,6 @@ class MT_OT_ReplaceMainBody(Operator):
             self.report({'ERROR'}, "请同时选中两个网格: 你的模型 + 要被替换的目标")
             return {'CANCELLED'}
 
-        # 只换名字。**不动**父级 / matrix_parent_inverse / 骨架修改器 ——
-        # 之前把目标的 matrix_parent_inverse 抄过来, 那个矩阵含缩放,
-        # 贴到你的模型上就把它拉伸、位置也变了。而且这个功能本来也不需要绑定。
         info = []
         base = target.name
         old_name = new.name
@@ -450,7 +362,6 @@ class MT_OT_ReplaceMainBody(Operator):
         return {'FINISHED'}
 
 class MT_OT_CopyVGroups(Operator):
-    """复制当前模型的顶点组名称到剪贴板"""
     bl_idname = "mt_framework.copy_vgroups"
     bl_label = "复制顶点组"
     bl_description = "复制当前选中模型的顶点组名称"
@@ -466,7 +377,6 @@ class MT_OT_CopyVGroups(Operator):
         return {'FINISHED'}
 
 class MT_OT_PasteVGroups(Operator):
-    """粘贴顶点组到选中的模型（不改变已有的顶点组）"""
     bl_idname = "mt_framework.paste_vgroups"
     bl_label = "粘贴顶点组"
     bl_description = "将剪贴板中的顶点组名称添加到选中的网格模型"
@@ -489,101 +399,93 @@ class MT_OT_PasteVGroups(Operator):
         return {'FINISHED'}
 
 class MT_OT_ImportSBC(Operator):
-    """导入 .sbc 碰撞文件"""
     bl_idname = "mt_framework.import_sbc"
     bl_label = "导入 SBC"
     bl_description = "导入 REHD Stage Base Collision (.sbc) 文件"
-    
+
     filepath: StringProperty(subtype='FILE_PATH')
-    
+
     def execute(self, context):
         if not self.filepath:
             return {'CANCELLED'}
-        
+
         from .MTframework_MHGU_import import import_sbc_file
         import_sbc_file(self.filepath)
-        
+
         return {'FINISHED'}
-    
+
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
 class MT_OT_ImportADR(Operator):
-    """导入 .adr 门数据文件"""
     bl_idname = "mt_framework.import_adr"
     bl_label = "导入 ADR"
     bl_description = "导入 REHD door data (.adr) 文件"
-    
+
     filepath: StringProperty(subtype='FILE_PATH')
-    
+
     def execute(self, context):
         if not self.filepath:
             return {'CANCELLED'}
-        
+
         from .MTframework_MHGU_import import import_adr_file
         import_adr_file(self.filepath)
-        
+
         return {'FINISHED'}
-    
+
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
 class MT_OT_ImportEMS(Operator):
-    """导入 .ems 敌人出生数据文件"""
     bl_idname = "mt_framework.import_ems"
     bl_label = "导入 EMS"
     bl_description = "导入 REHD enemy spawn (.ems) 文件"
-    
+
     filepath: StringProperty(subtype='FILE_PATH')
-    
+
     def execute(self, context):
         if not self.filepath:
             return {'CANCELLED'}
-        
+
         from .MTframework_MHGU_import import import_ems_file
         import_ems_file(self.filepath)
-        
+
         return {'FINISHED'}
-    
+
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
 class MT_OT_RenameSelected(Operator):
-    """
-    重命名选中的网格
-    对应原始脚本 btn7 (lines 5997-6024)
-    """
     bl_idname = "mt_framework.rename_selected"
     bl_label = "重命名选中"
     bl_description = "批量修改选中网格的名称组件 (LOD/MatID/Group/DisplayMode)"
-    
+
     def execute(self, context):
         props = context.scene.MT_Framework_Props
         new_value = props.rename_value
-        
+
         if not new_value:
             self.report({'WARNING'}, "请输入新值")
             return {'CANCELLED'}
-        
+
         count = 0
         for obj in context.selected_objects:
             if obj.name.startswith("Mesh_") and obj.type == 'MESH':
                 sName = obj.name.split("_")
                 if len(sName) < 8:
                     continue
-                
+
                 try:
-                    # 解析现有组件
+
                     mshHdr_lod = int(sName[3].split("x")[1]) if "x" in sName[3] else 0
                     mshHdr_matid = int(sName[4].split(":")[1]) if ":" in sName[4] else 0
                     mshHdr_grp = int(sName[5].split(":")[1]) if ":" in sName[5] else 0
                     mshHdr_mde = int(sName[6].split(":")[1]) if ":" in sName[6] else 0
                     mshHdr_type = int(sName[7].split(":")[1]) if ":" in sName[7] else 0
-                    
-                    # 根据模式替换
+
                     new_val = int(new_value)
                     if props.rename_mode == 'LOD':
                         mshHdr_lod = new_val
@@ -593,67 +495,61 @@ class MT_OT_RenameSelected(Operator):
                         mshHdr_grp = new_val
                     elif props.rename_mode == 'Display':
                         mshHdr_mde = new_val
-                    
-                    # 构建新名称
+
                     obj.name = "Mesh_{}_{}_LODx{}_MatID:{}_Group:{}_DisplayMode:{}_Type:{}".format(
                         sName[1], sName[2],
                         mshHdr_lod, mshHdr_matid,
                         mshHdr_grp, mshHdr_mde, mshHdr_type
                     )
                     count += 1
-                    
+
                 except (IndexError, ValueError):
                     continue
-        
+
         self.report({'INFO'}, "已重命名 {} 个网格".format(count))
-        
-        # 刷新过滤列表
+
         refresh_filter_lists(self, context)
-        
+
         return {'FINISHED'}
 
 class MT_OT_RefreshFilterLists(Operator):
-    """刷新过滤下拉列表"""
     bl_idname = "mt_framework.refresh_filters"
     bl_label = "刷新过滤列表"
     bl_description = "从场景中所有 Mesh_* 对象重新收集过滤选项"
-    
+
     def execute(self, context):
         refresh_filter_lists(self, context)
         self.report({'INFO'}, "过滤列表已刷新")
         return {'FINISHED'}
 
 class MT_OT_Diagnostic(Operator):
-    """诊断 - 打印场景信息到控制台"""
     bl_idname = "mt_framework.diagnostic"
     bl_label = "诊断"
     bl_description = "打印当前场景的模型/骨骼/顶点信息到控制台 (Window > Toggle System Console)"
-    
+
     def execute(self, context):
         print("\n" + "=" * 60)
         print("MT Framework MHGU - 诊断信息")
         print("=" * 60)
-        
-        # 场景中的网格对象
+
         mesh_objs = [obj for obj in bpy.data.objects if obj.type == 'MESH' and obj.name.startswith('Mesh_')]
         print(f"\n网格对象数: {len(mesh_objs)}")
         for obj in mesh_objs:
             mesh = obj.data
             print(f"  {obj.name}:")
             print(f"    顶点: {len(mesh.vertices)}, 面: {len(mesh.polygons)}, UV层: {len(mesh.uv_layers)}")
-            # 从名称中解析 FVF
+
             parts = obj.name.split('_')
             if len(parts) >= 3:
                 print(f"    FVF: {parts[2]}")
-            # 顶点组
+
             if obj.vertex_groups:
                 print(f"    顶点组: {[vg.name for vg in obj.vertex_groups]}")
-            # 自定义属性
+
             custom = {k: v for k, v in mesh.items() if not k.startswith('_')}
             if custom:
                 print(f"    属性: {custom}")
-        
-        # 骨架 (Armature) 与骨骼
+
         armatures = [obj for obj in bpy.data.objects if obj.type == 'ARMATURE']
         print(f"\n骨架 (Armature) 数量: {len(armatures)}")
         for arm in armatures:
@@ -674,7 +570,6 @@ class MT_OT_Diagnostic(Operator):
             if len(bones) > 12:
                 print(f"      ... 还有 {len(bones) - 12} 根")
 
-        # 蒙皮检测
         print(f"\n蒙皮检测:")
         for obj in mesh_objs:
             mods = [m for m in obj.modifiers if m.type == 'ARMATURE']
@@ -686,7 +581,6 @@ class MT_OT_Diagnostic(Operator):
             if unweighted:
                 print(f"    ⚠ {unweighted}/{len(obj.data.vertices)} 个顶点没有任何权重")
 
-        # 顶点坐标范围检测
         print(f"\n顶点坐标范围检测:")
         for obj in mesh_objs:
             mesh = obj.data
@@ -705,8 +599,7 @@ class MT_OT_Diagnostic(Operator):
                 print(f"    ⚠ {len(extreme)} 个顶点坐标绝对值 > 1000")
             if max(obj.scale) > 10:
                 print(f"    ⚠ 对象缩放 > 10, 模型可能过大")
-        
-        # 面异常检测
+
         print(f"\n面异常检测:")
         for obj in mesh_objs:
             mesh = obj.data
@@ -715,8 +608,7 @@ class MT_OT_Diagnostic(Operator):
                     if v >= len(mesh.vertices):
                         print(f"  {obj.name}: 面引用了不存在的顶点 {v}")
                         break
-        
-        # UV 检测
+
         print(f"\nUV 检测:")
         for obj in mesh_objs:
             mesh = obj.data
@@ -728,8 +620,7 @@ class MT_OT_Diagnostic(Operator):
                         invalid_uvs += 1
                 if invalid_uvs > len(mesh.loops) * 0.5:
                     print(f"  {obj.name}: UV层 '{uv_layer.name}' 大量异常 ({invalid_uvs}/{len(mesh.loops)})")
-        
-        # 物理链自检（CTC 与骨骼链是否对得上）
+
         print("\n物理链自检:")
         try:
             from .MTframework_MHGU_phys import recalled_arc
@@ -750,28 +641,23 @@ class MT_OT_Diagnostic(Operator):
                         print("    - " + _p)
                 else:
                     print("  正常：CTC 节点与骨骼链一致")
-        except Exception as _e:                          # noqa: BLE001
+        except Exception as _e:
             print("  物理自检出错：%s" % _e)
 
         print("\n" + "=" * 60)
         print("诊断完成，请复制上方信息")
         print("=" * 60 + "\n")
-        
+
         self.report({'INFO'}, "诊断信息已打印到控制台 (Window > Toggle System Console)")
         return {'FINISHED'}
 
-# ============================================================
-# UI 面板
-# ============================================================
-
 class MT_PT_MainPanel(Panel):
-    """MT_Framework_Tools 工具主面板"""
     bl_label = "MT_Framework_Tools"
     bl_idname = "MT_PT_MainPanel"
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = "MTFramework"
-    
+
     def draw(self, context):
         layout = self.layout
         scn = context.scene
@@ -784,7 +670,6 @@ class MT_PT_MainPanel(Panel):
         except Exception:
             _ver = '?'
 
-        # ---------------- 标题 / 当前状态 ----------------
         head = layout.box()
         hc = head.column(align=True)
         hc.label(text="MT Framework Tools   v%s" % _ver, icon='TOOL_SETTINGS')
@@ -811,7 +696,6 @@ class MT_PT_MainPanel(Panel):
         def sub(box, text, icon='DOT'):
             box.label(text=text, icon=icon)
 
-        # ---------------- 模型 ----------------
         if section('MT_UiIo', '模型', 'MESH_DATA', default=True):
             box = layout.box()
             col = box.column(align=True)
@@ -849,8 +733,6 @@ class MT_PT_MainPanel(Panel):
                     _op.target_gender = scn.MT_TransplantGender
                     _op.out_dir = scn.MT_TransplantOutDir
 
-
-        # ---------------- 贴图 ----------------
         if section('MT_UiTex', '贴图 (.tex)', 'IMAGE_DATA', default=False):
             try:
                 if not hasattr(ops, 'import_tex'):
@@ -880,7 +762,6 @@ class MT_PT_MainPanel(Panel):
                 box = layout.box()
                 box.label(text="贴图面板出错: %s: %s" % (type(_e).__name__, _e), icon='ERROR')
 
-        # ---------------- 材质 ----------------
         if section('MT_UiPhys', '物理骨骼', 'BONE_DATA', default=False):
             try:
                 if hasattr(ops, 'phys_matrix_auto'):
@@ -931,7 +812,6 @@ class MT_PT_MainPanel(Panel):
                             cc.operator("mt_framework.phys_ctc_fix",
                                         text="修复 CTC 头（重力缩放）", icon='CHECKMARK')
 
-
                 if hasattr(ops, 'phys_custom_register'):
                     xb = layout.box()
                     sub(xb, "自定义物理骨", 'OUTLINER_OB_ARMATURE')
@@ -957,15 +837,13 @@ class MT_PT_MainPanel(Panel):
                         else:
                             xb.label(text="当前 CTC：无（点上面的「重建 CTC」或重新登记）",
                                      icon='ERROR')
-                    except Exception:                   # noqa: BLE001
+                    except Exception:
                         pass
 
-                    # ---- 解算迭代（长/弯发束）----
                     xb = layout.box()
                     sub(xb, "解算迭代（长头发 / 弯发束）", 'MOD_PHYSICS')
                     xb.prop(scn, 'MT_PhysIter', text="迭代次数")
 
-                    # ---- 碰撞胶囊 CCL（2026-11-17 实机验证的做法）----
                     xb = layout.box()
                     sub(xb, "碰撞胶囊 CCL（头发↔身体避让）", 'MOD_PHYSICS')
                     xb.prop(scn, 'MT_CclEnable',
@@ -984,13 +862,13 @@ class MT_PT_MainPanel(Panel):
                                          icon='CHECKMARK')
                             else:
                                 xb.label(text="当前 arc 没有 CCL 条目", icon='INFO')
-                    except Exception:                   # noqa: BLE001
+                    except Exception:
                         pass
-                    # ★ 1.2.197：自定义胶囊（MT_CclCapsules，JSON）—— 非空时导出用它
+
                     try:
                         from .MTframework_MHGU_ccl import capsules_from_json as _caps_json
                         _n_custom = len(_caps_json(getattr(scn, 'MT_CclCapsules', '') or ''))
-                    except Exception:                   # noqa: BLE001
+                    except Exception:
                         _n_custom = 0
                     xb.label(text="自定义胶囊 %d 个 / 自动 11 个" % _n_custom,
                              icon=('CHECKMARK' if _n_custom else 'INFO'))
@@ -1004,7 +882,6 @@ class MT_PT_MainPanel(Panel):
                     row.operator('mt_framework.ccl_capsule_clear',
                                  text='清空', icon='X')
 
-                    # ---- 骨段碰撞 ShapeObject=2（1.2.197）----
                     xb = layout.box()
                     sub(xb, "骨段碰撞（ShapeObject=2）", 'MOD_PHYSICS')
                     xb.prop(scn, 'MT_PhysSegment', text="链节用骨段碰撞（链尾仍是点）")
@@ -1012,7 +889,6 @@ class MT_PT_MainPanel(Panel):
                 box = layout.box()
                 box.label(text="物理面板出错: %s: %s" % (type(_e).__name__, _e), icon='ERROR')
 
-        # ---------------- 头盔显示 ----------------
         if section('MT_UiHelm', '头盔显示', 'MESH_CIRCLE', default=False):
             try:
                 box = layout.box()
@@ -1028,7 +904,7 @@ class MT_PT_MainPanel(Panel):
                 row = col.row(align=True)
                 row.operator("mt_framework.helm_disp_read", text="读取", icon='FILE_REFRESH')
                 row.operator("mt_framework.helm_disp_apply", text="应用", icon='CHECKMARK')
-                # ★ 1.2.193 随从猫藏头（otomo 的 XFS 是另一套位，玩家预设无效）
+
                 col = box.column(align=True)
                 col.separator()
                 col.label(text="随从猫藏头（otomo h.arc / b.arc）", icon='BONE_DATA')
@@ -1040,7 +916,6 @@ class MT_PT_MainPanel(Panel):
                 box = layout.box()
                 box.label(text="头盔面板出错: %s: %s" % (type(_e).__name__, _e), icon='ERROR')
 
-        # ---------------- 顶点组 ----------------
         if section('MT_UiVtx', '顶点组 / 名称', 'GROUP_BONE', default=True):
             try:
                 box = layout.box()
@@ -1059,7 +934,6 @@ class MT_PT_MainPanel(Panel):
                 box = layout.box()
                 box.label(text="顶点组面板出错: %s: %s" % (type(_e).__name__, _e), icon='ERROR')
 
-        # ---------------- 导入设置 ----------------
         if section('MT_UiSet', '导入设置', 'SETTINGS', default=False):
             box = layout.box()
             if props is None:
@@ -1074,18 +948,13 @@ class MT_PT_MainPanel(Panel):
                 col.prop(props, "strict_phys", text="严格物理校验（不一致就阻止导出）")
                 box.label(text="改完要重新导入模型才生效", icon='INFO')
 
-        # ---------------- 工具 ----------------
         tl = layout.box()
         row = tl.row(align=True)
         if hasattr(ops, 'diagnostic'):
             row.operator("mt_framework.diagnostic", text="诊断", icon='CONSOLE')
         if hasattr(ops, 'refresh_filters'):
             row.operator("mt_framework.refresh_filters", text="刷新过滤", icon='FILE_REFRESH')
-# ============================================================
-# 注册
-# ============================================================
 
-#: 面板各分区的折叠开关（顺序 = 面板从上到下的顺序）
 UI_SECTIONS = (
     ('MT_UiIo', "模型", True),
     ('MT_UiTex', "贴图 (.tex)", False),
@@ -1096,11 +965,6 @@ UI_SECTIONS = (
 )
 
 class MT_OT_PartTransplant(Operator):
-    """把当前工程里做好的模型导出，并打包成目标部位的 arc
-
-    以前是复制“导入时的原版 arc”，工程里改的模型不会生效；
-    现在改为先用正常导出管线导出当前工程，再替换目标 arc 里的 .mod。
-    """
     bl_idname = "mt_framework.part_transplant"
     bl_label = "跨部位导出（当前工程 → 目标部位）"
     bl_description = ("导出当前工程的模型，替换容器 arc 里的 .mod，"
@@ -1142,13 +1006,12 @@ class MT_OT_PartTransplant(Operator):
                         '或到模型区点「选择 arc 容器」选原版 body.arc')
             return {'CANCELLED'}
 
-        # 1) 用正常导出管线，把**当前工程**导出成临时 .mod
         tmpdir = tempfile.mkdtemp(prefix='mt_transplant_')
         tmp_mod = os.path.join(tmpdir, 'export.mod')
-        # 导出只写「选中的网格」；跨部位导出要的是整个工程 → 临时全选
+
         prev_sel = [o for o in context.selected_objects]
         prev_active = context.view_layer.objects.active
-        # 和直接导出保持一致：有选中网格就只导选中的；没选中才退回全部可见网格
+
         sel_meshes = [o for o in context.selected_objects
                       if o.type == 'MESH' and len(o.data.vertices) > 0
                       and not o.hide_get()]
@@ -1162,12 +1025,12 @@ class MT_OT_PartTransplant(Operator):
             for o in meshes:
                 try:
                     o.select_set(True)
-                except Exception:                       # noqa: BLE001
+                except Exception:
                     pass
             if meshes:
                 context.view_layer.objects.active = meshes[0]
             out_mod = _export(self, context, tmp_mod)
-        except Exception as e:                          # noqa: BLE001
+        except Exception as e:
             self.report({'ERROR'}, '导出当前工程失败：%s' % e)
             return {'CANCELLED'}
         finally:
@@ -1176,10 +1039,10 @@ class MT_OT_PartTransplant(Operator):
                 for o in prev_sel:
                     try:
                         o.select_set(True)
-                    except Exception:                   # noqa: BLE001
+                    except Exception:
                         pass
                 context.view_layer.objects.active = prev_active
-            except Exception:                           # noqa: BLE001
+            except Exception:
                 pass
         if not out_mod or not os.path.exists(out_mod):
             self.report({'ERROR'}, '导出当前工程失败（没有生成 .mod）')
@@ -1187,14 +1050,13 @@ class MT_OT_PartTransplant(Operator):
         try:
             with open(out_mod, 'rb') as f:
                 new_mod = f.read()
-        except Exception as e:                          # noqa: BLE001
+        except Exception as e:
             self.report({'ERROR'}, '读取临时 .mod 失败：%s' % e)
             return {'CANCELLED'}
         if new_mod[:4] != MOD_MAGIC:
             self.report({'ERROR'}, '导出的不是 .mod（文件头不对）')
             return {'CANCELLED'}
 
-        # 2) 容器 arc 提供 TEX/MRL 等条目；替换其中 .mod
         with open(arc_path, 'rb') as f:
             entries = arc_entries(f.read())
         mod_e = find_entry(entries, MOD_MAGIC)
@@ -1212,10 +1074,10 @@ class MT_OT_PartTransplant(Operator):
         if not digits.isdigit():
             self.report({'ERROR'}, '目标套号必须是数字：%s' % digits)
             return {'CANCELLED'}
-        # 目标性别：same = 跟随源（f 女 / m 男）；f/m = 跨性别移植
+
         gender = src_gender if self.target_gender in ('', 'same') else self.target_gender
         tgt = '%s_%s%s' % (gender, self.target_part, digits)
-        # 跨防具：内部资源路径里的 plNNN 目录也要换成目标套号
+
         _plm = re.search(r'\\pl(\d+)\\', mod_e['name'])
         src_pl = ('pl' + _plm.group(1)) if _plm else None
         tgt_pl = 'pl' + digits
@@ -1224,19 +1086,18 @@ class MT_OT_PartTransplant(Operator):
             if src_pl and src_pl != tgt_pl:
                 path = path.replace('\\%s\\' % src_pl, '\\%s\\' % tgt_pl)
             if gender != src_gender:
-                # player\mod\f\plNNN / player\com\f\NNN 这类目录里的性别段
+
                 for _p in ('\\mod\\', '\\com\\'):
                     path = path.replace(_p + src_gender + '\\', _p + gender + '\\')
-                # 共用目录里的性别贴图：common\f_skin_BM -> common\m_skin_BM
+
                 path = path.replace('\\common\\%s_' % src_gender,
                                     '\\common\\%s_' % gender)
             return path
 
-        # 物理 CTC：优先用场景里当前工程的，其次用容器的
         ctc = None
         try:
             _a, ctc = recalled_arc(context)
-        except Exception:                               # noqa: BLE001
+        except Exception:
             ctc = None
         if not ctc:
             c_e = find_entry(entries, CTC_MAGIC)
@@ -1252,11 +1113,10 @@ class MT_OT_PartTransplant(Operator):
             return full
 
         def _patch_mrl_tex(body):
-            """mrl 贴图路径是 0x28 起、每条 76B（12B 头 + 64B 定长名）的字段。"""
             b = bytearray(body)
             try:
                 cnt = struct.unpack_from('<I', b, 0x0C)[0]
-            except Exception:                           # noqa: BLE001
+            except Exception:
                 cnt = 0
             ob, nb = src.encode(), tgt.encode()
             for i in range(min(cnt, 64)):
@@ -1305,13 +1165,13 @@ class MT_OT_PartTransplant(Operator):
             elif base.startswith(src + '_'):
                 name = _rename(name, base)
             else:
-                # 共用目录里的性别条目（common\f_skin_BM 等）也要跟着换性别
+
                 name = _rename_path(name)
             raw = zlib.compress(body, 9)
             flag = (e['flag'] & 0xFF000000) | (len(body) & 0xFFFFFF)
             out_entries.append(dict(name=name, hash=e['hash'],
                                     flag=flag, raw=raw, body=body))
-        # helm 必须有 XFS（藏头/头盔显示）；源工程是 body 时没有，自动补标准 XFS
+
         if (self.target_part == 'helm' and mod_name is not None
                 and not any(e['body'][:4] == b'XFS\x00' for e in out_entries)):
             _xfs = base64.b64decode(_BMT_XFS_B64)
@@ -1334,7 +1194,6 @@ class MT_OT_PartTransplant(Operator):
             else:
                 out_entries.append(_ctc_e)
 
-        # 3) 输出目录
         raw_dir = (self.out_dir or '').strip().strip('"')
         if raw_dir:
             out_dir = os.path.normpath(bpy.path.abspath(raw_dir))
@@ -1342,7 +1201,7 @@ class MT_OT_PartTransplant(Operator):
             out_dir = os.path.dirname(arc_path)
         try:
             os.makedirs(out_dir, exist_ok=True)
-        except Exception as e:                          # noqa: BLE001
+        except Exception as e:
             self.report({'ERROR'}, '输出目录无法创建：%s（%s）' % (out_dir, e))
             return {'CANCELLED'}
 
@@ -1354,24 +1213,14 @@ class MT_OT_PartTransplant(Operator):
                     % (dst, struct.unpack_from('<H', new_mod, 6)[0]))
         return {'FINISHED'}
 
-# ============================================================
-# 碰撞胶囊自定义（1.2.197）
-# ============================================================
 def _ccl_bone_game_id(name, index):
-    """骨名 -> 游戏骨 id：本项目约定 b_<N> => N-1。
-
-    带 .l/.r 后缀或改过名的骨「按名字取不到」（同一个 N 会对应左右两根），
-    按骨架顺序 0 基兜底。
-    """
     import re
     m = re.match(r'^b_(\d+)$', name or '')
     if m:
         return int(m.group(1)) - 1
     return index
 
-
 def _ccl_selected_bones(context):
-    """返回 (骨架, [(骨名, 游戏骨 id)])，按骨架顺序排列（两根时「第一根」= 靠前的）。"""
     from .MTframework_MHGU_phys import _phys_armature
     arm = _phys_armature(context)
     if arm is None:
@@ -1381,38 +1230,35 @@ def _ccl_selected_bones(context):
         for pb in (context.selected_pose_bones or []):
             if pb is not None and pb.bone is not None and pb.bone.name not in names:
                 names.append(pb.bone.name)
-    except Exception:                                   # noqa: BLE001
+    except Exception:
         pass
     if not names:
         try:
             for eb in arm.data.edit_bones:
                 if eb.select:
                     names.append(eb.name)
-        except Exception:                               # noqa: BLE001
+        except Exception:
             pass
     if not names:
         for b in arm.data.bones:
             try:
                 if b.select:
                     names.append(b.name)
-            except Exception:                           # noqa: BLE001
+            except Exception:
                 pass
     order = {b.name: i for i, b in enumerate(arm.data.bones)}
     names.sort(key=lambda n: order.get(n, 1 << 30))
     return arm, [(n, _ccl_bone_game_id(n, order.get(n, 0))) for n in names]
-
 
 def _set_ccl_capsules(scene, capsules):
     from .MTframework_MHGU_ccl import capsules_to_json
     txt = capsules_to_json(capsules)
     try:
         scene.MT_CclCapsules = txt
-    except Exception:                                   # noqa: BLE001
+    except Exception:
         scene['MT_CclCapsules'] = txt
 
-
 class MT_OT_CclCapsuleAdd(Operator):
-    """把骨架里选中的骨加成一个碰撞胶囊（1 根 = 单球，2 根 = 骨A→骨B）"""
     bl_idname = "mt_framework.ccl_capsule_add"
     bl_label = "加胶囊（选中骨）"
     bl_description = "选中 1~2 根骨后点：加一条自定义胶囊（导出 helm/hair 时写进 CCL）"
@@ -1433,7 +1279,7 @@ class MT_OT_CclCapsuleAdd(Operator):
             bones = bones[:2]
         try:
             radius = float(getattr(sc, 'MT_CclRadius', 10.0) or 0.0)
-        except Exception:                               # noqa: BLE001
+        except Exception:
             radius = 10.0
         caps = capsules_from_json(getattr(sc, 'MT_CclCapsules', '') or '')
         a, b = bones[0][1], bones[-1][1]
@@ -1444,9 +1290,7 @@ class MT_OT_CclCapsuleAdd(Operator):
                     % (bones[0][0], a, bones[-1][0], b, radius, len(caps)))
         return {'FINISHED'}
 
-
 class MT_OT_CclCapsuleClear(Operator):
-    """清空自定义碰撞胶囊"""
     bl_idname = "mt_framework.ccl_capsule_clear"
     bl_label = "清空胶囊"
     bl_description = "清空 MT_CclCapsules（导出退回自动 11 个身体胶囊）"
@@ -1456,9 +1300,7 @@ class MT_OT_CclCapsuleClear(Operator):
         self.report({'INFO'}, '已清空自定义胶囊（导出用自动 11 个）')
         return {'FINISHED'}
 
-
 class MT_OT_CclCapsuleDel(Operator):
-    """删掉最后一个自定义碰撞胶囊"""
     bl_idname = "mt_framework.ccl_capsule_del"
     bl_label = "删最后一个胶囊"
     bl_description = "删掉自定义胶囊列表的最后一个"
@@ -1475,9 +1317,7 @@ class MT_OT_CclCapsuleDel(Operator):
         self.report({'INFO'}, '已删掉最后一个胶囊，还剩 %d 个' % len(caps))
         return {'FINISHED'}
 
-
 class MT_OT_WeightsNormalize(Operator):
-    """删掉非骨骼顶点组，并把每个顶点的骨骼权重归一化到 1"""
     bl_idname = "mt_framework.weights_normalize"
     bl_label = "权重归一化（删非骨骼组）"
     bl_description = ("把 mmd_edge_scale / mmd_vertex_order 这类非骨骼组删掉，"
@@ -1508,7 +1348,7 @@ class MT_OT_WeightsNormalize(Operator):
             for n in drop:
                 try:
                     o.vertex_groups.remove(o.vertex_groups[n])
-                except Exception:                       # noqa: BLE001
+                except Exception:
                     pass
             removed_total += len(drop)
             idx = {g.index: g.name for g in o.vertex_groups}
@@ -1523,7 +1363,7 @@ class MT_OT_WeightsNormalize(Operator):
                 for gi, w in ws:
                     try:
                         o.vertex_groups[idx[gi]].add([v.index], w / tot, 'REPLACE')
-                    except Exception:                   # noqa: BLE001
+                    except Exception:
                         pass
                 avg_after.append(1.0)
                 renorm_total += 1
@@ -1557,7 +1397,7 @@ def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.Scene.MT_Framework_Props = bpy.props.PointerProperty(type=MTFrameworkProperties)
-    # 跨部位移植的界面开关（放 Scene 上，面板直接引用）
+
     bpy.types.Scene.MT_PhysIter = IntProperty(
         name="CTC 解算迭代", default=1, min=1, max=3,
         description="写进 CTC 头 +52/+53；长/弯发束用 3 可减少被限位拉长")
@@ -1576,7 +1416,7 @@ def register():
                ('m', '男 m', '目标资源名与路径用 m_（male）')])
     bpy.types.Scene.MT_TransplantOutDir = StringProperty(
         name="输出目录", subtype='DIR_PATH', default="")
-    # ★ 1.2.197：自定义碰撞胶囊 / 骨段碰撞 / 导出跳过隐藏网格
+
     bpy.types.Scene.MT_CclRadius = FloatProperty(
         name="胶囊半径", default=10.0, min=0.0, max=10000.0,
         description="「加胶囊（选中骨）」用的半径（游戏单位，和 CCL 记录 +0x2C 同尺度）")
@@ -1592,7 +1432,7 @@ def register():
         name="导出跳过隐藏网格", default=False,
         description="导出时跳过视口隐藏（hide_get / hide_viewport）的网格；"
                     "一个不剩也照常导出空模型")
-    # 面板各分区的折叠状态
+
     for _k, _label, _default in UI_SECTIONS:
         setattr(bpy.types.Scene, _k, BoolProperty(name=_label, default=_default))
 

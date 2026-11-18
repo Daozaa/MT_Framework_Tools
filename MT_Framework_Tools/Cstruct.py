@@ -1,8 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Declarative binary serialization framework for MT Framework MHGU
-Adapted from AsteriskAmpersand's MHW Mod3 plugin Cstruct.py
-"""
 from collections import OrderedDict
 import struct
 
@@ -211,4 +206,3 @@ class PyCStruct:
 
     defaultProperties = {}
     requiredProperties = {}
-

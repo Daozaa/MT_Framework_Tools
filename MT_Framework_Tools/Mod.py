@@ -1,13 +1,7 @@
-# -*- coding: utf-8 -*-
-"""
-MT Framework MHGU .mod file model
-Preserves original file layout, only replaces vertex/face data
-"""
 from collections import OrderedDict
 from .Cstruct import PyCStruct
 
 class MODHeader(PyCStruct):
-    """MOD file header — 58 bytes"""
     fields = OrderedDict([
         ("boneCount", "ushort"),
         ("meshCount", "ushort"),
@@ -28,7 +22,6 @@ class MODHeader(PyCStruct):
     ])
 
 class MeshHeaderStruct(PyCStruct):
-    """Mesh header — 48 bytes"""
     fields = OrderedDict([
         ("meshtype", "ushort"),
         ("vertCount", "ushort"),
@@ -53,4 +46,3 @@ class MeshHeaderStruct(PyCStruct):
         ("max_index", "ushort"),
         ("unk09", "ulong"),
     ])
-
