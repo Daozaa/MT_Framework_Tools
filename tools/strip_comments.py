@@ -1,6 +1,3 @@
-
-# -*- coding: utf-8 -*-
-"""去掉注释与 docstring（AST 定位 docstring，tokenize 定位注释），压缩空行。"""
 import ast, io, os, sys, tokenize
 
 SRC = sys.argv[1]

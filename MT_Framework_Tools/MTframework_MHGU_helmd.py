@@ -142,19 +142,23 @@ if bpy is not None:
         bl_description = "把 disp0 / disp1 写入所有记录；导出 .arc 时生效"
 
         def execute(self, context):
+            sc = context.scene
             xfs = get_modified_xfs(context) or arc_xfs(context)
             if not xfs:
-                self.report({'ERROR'}, '当前 arc 里没有 XFS')
-                return {'CANCELLED'}
-            sc = context.scene
+
+                from .MTframework_MHGU_ui import _BMT_XFS_B64
+                xfs = base64.b64decode(_BMT_XFS_B64)
             try:
                 new, n = write_disp(xfs, sc.MT_HelmDisp0, sc.MT_HelmDisp1)
             except Exception as e:
                 self.report({'ERROR'}, str(e))
                 return {'CANCELLED'}
             set_modified_xfs(context, new)
-            self.report({'INFO'}, '已写入 %d 条记录：disp0=0x%04X disp1=0x%04X'
-                        % (n, sc.MT_HelmDisp0, sc.MT_HelmDisp1))
+            self.report({'INFO'},
+                        '已写入 %d 条记录：disp0=0x%04X disp1=0x%04X%s'
+                        % (n, sc.MT_HelmDisp0, sc.MT_HelmDisp1,
+                           '' if arc_xfs(context) else '（当前 arc 无 XFS：已记为待写入，'
+                           '跨部位导出到 helm 时生效）'))
             return {'FINISHED'}
 
     class MT_OT_HelmPreset(Operator):

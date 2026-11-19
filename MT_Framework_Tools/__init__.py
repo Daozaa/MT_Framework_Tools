@@ -1,7 +1,7 @@
 bl_info = {
     "name": "MT_Framework_Tools",
     "author": "Daze",
-    "version": (1, 2, 202),
+    "version": (1, 2, 220),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > MTFramework",
     "description": "",

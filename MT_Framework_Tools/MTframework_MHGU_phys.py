@@ -168,34 +168,45 @@ def export_arc(context, arc_path, mod_path, mod_bytes, dst=None):
     _ccl_on = bool(getattr(context.scene, 'MT_CclEnable', False))
     if _custom_caps:
         _ccl_on = True
+    _caps_written = []
     if _ccl_on and _CCL is not None:
         try:
             _low = (arc_path or '').replace('/', '\\').lower()
             _nm_low = (mod.get('name') or '').lower()
             _helm_like = ('\\helm' in _low or '\\hair' in _low
                           or 'helm' in _nm_low or 'hair' in _nm_low)
+
             if _helm_like:
                 _caps = _custom_caps or _CCL.body_capsules(mod_bytes)
                 if _caps:
+
+                    try:
+                        from .MTframework_MHGU_verify import capsule_warnings
+                        _warns, _sum = capsule_warnings(_caps)
+                        print('[MT] 胶囊体检：%s' % _sum)
+                        for _w in _warns:
+                            print('[MT] 警告：%s' % _w)
+                    except Exception:
+                        pass
                     _CCL.apply_to_entries(entries, mod['name'], _CCL.build_ccl(_caps))
+                    _caps_written = list(_caps)
                     print('[MT] 已写入 CCL：%d 个胶囊（%s，%s）'
                           % (len(_caps),
                              '自定义' if _custom_caps else '自动',
                              mod.get('name')))
-                    if ctc_bytes:
-                        ctc_bytes, _nf = _CCL.enable_collision_flags(ctc_bytes)
-                        if _nf:
-                            print('[MT] CTC 碰撞标志位已打开：%d 组 (+0x04)' % _nf)
                 else:
                     print('[MT] 警告：CCL 没生成出胶囊（骨表里没有 0~19 号骨？）')
-            else:
-                print('[MT] 警告：CCL 只在 helm / hair 槽生效，当前 arc 不是该槽，已跳过写入'
-                      '（body/wst/arm/leg 的 CCL 游戏里不会用）')
+            elif _custom_caps:
+                print('[MT] 当前 arc 不是 helm/hair：不写 CCL 条目（引擎只读该槽的 CCL）')
+            if ctc_bytes:
+                ctc_bytes, _nf = _CCL.enable_collision_flags(ctc_bytes)
+                if _nf:
+                    print('[MT] CTC 碰撞标志位已打开：%d 组 (+0x04)' % _nf)
         except Exception as _e_cc:
             print('[MT] CCL 写入失败:', _e_cc)
 
     try:
-        _it = int(context.scene.get('MT_PhysIter', 1) or 1)
+        _it = int(getattr(context.scene, 'MT_PhysIter', 1) or 1)
     except Exception:
         _it = 1
     if ctc_bytes and _it != 1 and ctc_bytes[:4] == b'CTC\x00' and len(ctc_bytes) >= 0x38:
@@ -246,9 +257,15 @@ def export_arc(context, arc_path, mod_path, mod_bytes, dst=None):
     out = arc_build(entries)
     if not dst:
         dst = arc_path + '.new'
-    with open(dst, 'wb') as f:
-        f.write(out)
-    return dst
+
+    from .MTframework_MHGU_verify import write_arc_verified
+    _dst2, _bak = write_arc_verified(
+        dst, out,
+        caps=_caps_written or None,
+        want_ccl=True if _caps_written else None)
+    print('[MT] 已校验并写入 %s%s'
+          % (_dst2, ('（备份 %s）' % os.path.basename(_bak)) if _bak else ''))
+    return _dst2
 
 def remember_arc(context, arc_path, ctc_bytes):
     sc = context.scene
@@ -642,7 +659,8 @@ def _export(operator, context, filepath):
                     context.scene['MT_ArcPath'] = filepath
         except Exception:
             pass
-    if arc_path and os.path.exists(arc_path):
+    if (arc_path and os.path.exists(arc_path)
+            and not context.scene.get('MT_SkipArcBuild', False)):
         try:
             with open(out, 'rb') as f:
                 mod_bytes = f.read()
