@@ -54,6 +54,13 @@ def load_bytes(context=None):
     except Exception:
         return None
 
+def _project_template_path(context, data, suffix=''):
+    import bpy
+    name = os.path.splitext(os.path.basename(bpy.data.filepath or 'project'))[0]
+    name = ''.join(ch for ch in name if ch.isalnum() or ch in '_-') or 'project'
+    return os.path.join(tempfile.gettempdir(),
+                        'mt_template_%s_%s%s.mod' % (name, _sha1(data)[:6], suffix))
+
 def materialize(context=None, suffix=''):
     try:
         import bpy
@@ -62,10 +69,7 @@ def materialize(context=None, suffix=''):
             return ''
         ctx = context or bpy.context
         sc = ctx.scene
-        name = os.path.splitext(os.path.basename(bpy.data.filepath or 'project'))[0]
-        name = ''.join(ch for ch in name if ch.isalnum() or ch in '_-') or 'project'
-        p = os.path.join(tempfile.gettempdir(),
-                         'mt_template_%s_%s%s.mod' % (name, _sha1(data)[:6], suffix))
+        p = _project_template_path(ctx, data, suffix)
         need = True
         if os.path.exists(p):
             try:
@@ -82,7 +86,7 @@ def materialize(context=None, suffix=''):
         print('[MT] 内嵌模板落盘失败:', exc)
         return ''
 
-def sync(context=None, verbose=True):
+def ensure(context=None, verbose=True):
     try:
         import bpy
         ctx = context or bpy.context
@@ -93,21 +97,52 @@ def sync(context=None, verbose=True):
 
             if cur and os.path.exists(cur):
                 store(ctx, cur)
+                emb = load_bytes(ctx)
+            else:
+                return cur
+        if not emb:
             return cur
-        h = _sha1(emb)
-        cur_h = ''
-        if cur and os.path.exists(cur):
-            try:
-                with open(cur, 'rb') as f:
-                    cur_h = _sha1(f.read())
-            except Exception:
-                cur_h = ''
-        if cur_h == h:
-            return cur
+
         p = materialize(ctx)
-        if p and verbose:
-            print('[MT] 模板按 .blend 内嵌的版本恢复：%s → %s' % (cur or '（空）', p))
+        if p and verbose and p != cur:
+            print('[MT] 模板改用本工程快照：%s → %s' % (cur or '（空）', p))
         return p or cur
     except Exception as exc:
         print('[MT] 模板同步失败:', exc)
         return ''
+
+def sync(context=None, verbose=True):
+    try:
+        return ensure(context, verbose=verbose)
+    except Exception as exc:
+        print('[MT] 模板同步失败:', exc)
+        return ''
+
+def _on_load_post(*_args):
+    try:
+        import bpy
+        ensure(bpy.context, verbose=False)
+    except Exception as exc:
+        print('[MT] 打开工程模板自愈失败:', exc)
+
+try:
+    import bpy as _bpy
+    _on_load_post = _bpy.app.handlers.persistent(_on_load_post)
+except Exception:
+    pass
+
+def register():
+    try:
+        import bpy
+        if _on_load_post not in bpy.app.handlers.load_post:
+            bpy.app.handlers.load_post.append(_on_load_post)
+    except Exception as exc:
+        print('[MT] 模板自愈处理器注册失败:', exc)
+
+def unregister():
+    try:
+        import bpy
+        if _on_load_post in bpy.app.handlers.load_post:
+            bpy.app.handlers.load_post.remove(_on_load_post)
+    except Exception:
+        pass

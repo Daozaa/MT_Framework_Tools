@@ -5,7 +5,7 @@ import struct
 
 try:
     import bpy
-    from bpy.props import EnumProperty, FloatProperty, IntProperty
+    from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty
     from bpy.types import Operator
 except Exception:
     bpy = None
@@ -84,22 +84,110 @@ def write_params(ctc, gravity=None, damping=None, spring=None, wind=None,
     return bytes(b)
 
 PHYS_PRESETS = {
-    'hair_soft':   ("丝绸·软",   -600.0, 0.12, 0.020, 0.80, 0.8, 100.0, 0.10, 1.75, 1.0, 1.0),
-    'hair_wave':   ("长绸·波浪",    -900.0, 0.20, 0.015, 0.60, 0.7, 100.0, 0.12, 1.60, 1.2, 1.0),
-    'cloth_std':   ("棉布·标准",    -850.0, 0.18, 0.015, 1.00, 0.8, 100.0, 0.10, 1.57, 1.0, 1.0),
-    'ribbon':      ("丝带·轻飘",   -400.0, 0.10, 0.030, 1.20, 0.9, 100.0, 0.10, 2.00, 0.8, 1.0),
-    'cape_heavy':  ("帆布·厚重",   -2000.0, 0.35, 0.010, 0.30, 0.6, 120.0, 0.08, 1.20, 2.0, 1.0),
-    'armor_stiff': ("铁片·硬挺",   -3500.0, 0.50, 0.005, 0.10, 0.4, 150.0, 0.05, 0.60, 3.0, 1.0),
 
-    'soft_body':   ("贴身·软组织",   0.0, 0.85, 0.150, 0.10, 0.35, 100.0, 0.05, 0.30, 2.0, 1.0),
+    'soft_body':       ("贴身·软组织", 0.0, 0.850, 0.150, 0.10, 0.35, 100.0, 0.05, 0.30, 2.0, 1.0),
+    'soft_jiggle':     ("贴身·更软",   0.0, 0.250, 0.050, 0.15, 0.50, 100.0, 0.05, 0.90, 1.0, 1.0),
+    'soft_jiggle_max': ("贴身·最软",   0.0, 0.100, 0.020, 0.10, 0.60, 100.0, 0.05, 1.40, 0.6, 1.0),
 
-    'soft_jiggle': ("贴身·更软",     0.0, 0.250, 0.050, 0.15, 0.50, 100.0, 0.05, 0.90, 1.0, 1.0),
-    'soft_jiggle_max': ("贴身·最软", 0.0, 0.100, 0.020, 0.10, 0.60, 100.0, 0.05, 1.40, 0.6, 1.0),
-
-    'rigid':       ("刚性·跟随（无物理）", 0.0, 1.00, 1.00, 0.00, 0.00, 100.0, 0.05, 0.00, 1.0, 1.0),
+    'auto_hair':       ("自动·头发",   0.0, 0.120, 0.020, 0.80, 0.80, 100.0, 0.10, 1.75, 1.0, 1.0),
+    'auto_sleeve':     ("自动·长袖",   0.0, 0.180, 0.015, 1.00, 0.80, 100.0, 0.10, 1.70, 1.0, 1.0),
+    'auto_cloth':      ("自动·裙摆",   0.0, 0.180, 0.015, 1.00, 0.80, 100.0, 0.10, 1.57, 1.0, 1.0),
+    'auto_tail':       ("自动·尾巴",   0.0, 0.100, 0.030, 1.20, 0.90, 100.0, 0.10, 2.00, 0.8, 1.0),
+    'auto_ribbon':     ("自动·丝带",   0.0, 0.100, 0.030, 1.20, 0.90, 100.0, 0.10, 2.00, 0.8, 1.0),
+    'auto_other':      ("自动·通用",   0.0, 0.160, 0.015, 1.00, 0.80, 100.0, 0.10, 1.60, 1.0, 1.0),
 }
 
+PRESET_ALIASES = {
+    'hair_soft': 'auto_hair',
+    'hair_wave': 'auto_hair',
+    'cloth_std': 'auto_cloth',
+    'ribbon': 'auto_ribbon',
+    'cape_heavy': 'auto_cloth',
+    'armor_stiff': 'auto_other',
+    'rigid': 'auto_other',
+}
+DEFAULT_PRESET_KEY = 'auto_other'
+
+def normalize_preset_key(key):
+    key = PRESET_ALIASES.get(key, key)
+    return key if key in PHYS_PRESETS else DEFAULT_PRESET_KEY
+
+AUTO_PRESET_KEY = 'auto'
+AUTO_PRESET_LABEL = '自动·按部位/链长（重力0）'
+
+PHYS_PRESET_ITEMS = [(k, v[0], '') for k, v in PHYS_PRESETS.items()]
+
+def _region_key(names):
+    text = ' '.join(str(n).lower() for n in names)
+    if any(k in text for k in ('breast', 'bust', 'chest', '胸', '乳', '腹',
+                               'belly', 'hip', '臀')):
+        return 'body_soft'
+    if any(k in text for k in ('hair', 'ponytail', 'braid', '发', '刘海', '辫')):
+        return 'hair'
+    if any(k in text for k in ('sleeve', '袖')):
+        return 'sleeve'
+    if any(k in text for k in ('tail', '尾')):
+        return 'tail'
+    if any(k in text for k in ('ribbon', 'bow', 'tassel', 'scarf', '带',
+                               '蝴蝶结', '流苏', '围巾')):
+        return 'ribbon'
+    if any(k in text for k in ('skirt', 'cloth', 'cape', 'cloak', '裙', '布',
+                               '披风')):
+        return 'cloth'
+    return 'other'
+
+_REGION_INFO = {
+    'body_soft': ('贴身', 'soft_body'),
+    'hair': ('头发', 'auto_hair'),
+    'sleeve': ('长袖', 'auto_sleeve'),
+    'tail': ('尾巴', 'auto_tail'),
+    'ribbon': ('丝带', 'auto_ribbon'),
+    'cloth': ('裙摆', 'auto_cloth'),
+    'other': ('通用', 'auto_other'),
+}
+
+def auto_chain_values(names, positions):
+    region = _region_key(names)
+    label, preset_key = _REGION_INFO[region]
+    row = PHYS_PRESETS[preset_key]
+    _name, _grav, damp, spring, wind, trans, limit, reflect, angle, mass, elastic = row
+
+    grav = 0.0
+
+    length = 0.0
+    for i in range(len(positions) - 1):
+        a = positions[i]
+        b = positions[i + 1]
+        length += sum((float(b[k]) - float(a[k])) ** 2 for k in range(3)) ** 0.5
+    extent = max(0.0, min(1.0, (length - 20.0) / 120.0))
+
+    if region == 'body_soft':
+
+        damp = max(0.25, damp - 0.10 * extent)
+        trans = trans * (1.0 + 0.15 * extent)
+        spring = max(0.02, spring * (1.0 - 0.20 * extent))
+        angle = min(1.20, angle + 0.35 * extent)
+    else:
+        damp = max(0.03, min(1.0, damp * (1.0 - 0.18 * extent)))
+        spring = max(0.003, spring * (1.0 - 0.15 * extent))
+        trans = trans * (1.0 + 0.25 * extent)
+        angle = min(2.20, angle + 0.35 * extent)
+        mass = mass * (1.0 + 0.25 * extent)
+
+    n = max(1, len(names))
+    values = []
+    for i in range(n):
+        t = (i / float(n - 1)) if n > 1 else 0.0
+        values.append((min(2.20, angle * (0.75 + 0.50 * t)),
+                       mass * (1.10 - 0.20 * t), elastic))
+    gp = ('自动·%s/%d节' % (label, n), grav, damp, spring, wind, trans,
+          limit, reflect, angle, mass, elastic)
+    return gp, values
+
 def apply_preset(ctc, key):
+    if key == AUTO_PRESET_KEY:
+        raise ValueError('“自动”只用于新建/重建物理链；已有 CTC 请选具体预设')
+    key = normalize_preset_key(key)
     row = PHYS_PRESETS.get(key)
     if row is None:
         raise ValueError("没有这个预设: %s" % key)
@@ -121,6 +209,9 @@ def node_group_map(ctc):
     return node_group, group_nodes
 
 def apply_preset_selected(ctc, key, selected_ids):
+    if key == AUTO_PRESET_KEY:
+        raise ValueError('“自动”只用于新建/重建物理链；已有 CTC 请选具体预设')
+    key = normalize_preset_key(key)
     row = PHYS_PRESETS.get(key)
     if row is None:
         raise ValueError("没有这个预设: %s" % key)
@@ -203,12 +294,16 @@ if bpy is not None:
         S.MT_PhysElastic = FloatProperty(name="弹性", default=1.0, min=0.0, max=10.0)
         S.MT_PhysPreset = EnumProperty(
             name="物理预设",
-            items=[(k, v[0], '') for k, v in PHYS_PRESETS.items()],
-            default='cloth_std')
+            items=PHYS_PRESET_ITEMS,
+            default=DEFAULT_PRESET_KEY)
+        S.MT_PhysAutoInit = BoolProperty(
+            name="新链自动初值",
+            default=False,
+            description="登记或重建物理链时按骨名部位和链长生成初值；已有 CTC 不受影响")
     def _unregister_props():
         for k in ('MT_PhysGravity', 'MT_PhysDamping', 'MT_PhysSpring', 'MT_PhysWind',
                   'MT_PhysTrans', 'MT_PhysLimit', 'MT_PhysReflect', 'MT_PhysAngle',
-                  'MT_PhysMass', 'MT_PhysElastic'):
+                  'MT_PhysMass', 'MT_PhysElastic', 'MT_PhysPreset', 'MT_PhysAutoInit'):
             try:
                 delattr(bpy.types.Scene, k)
             except Exception:
@@ -368,7 +463,7 @@ if bpy is not None:
             if not ctc or ctc[:4] != b'CTC\x00':
                 self.report({'ERROR'}, '当前没有 CTC')
                 return {'CANCELLED'}
-            key = context.scene.MT_PhysPreset
+            key = normalize_preset_key(context.scene.MT_PhysPreset)
             try:
                 new = apply_preset(ctc, key)
             except Exception as e:
@@ -414,7 +509,7 @@ if bpy is not None:
                 self.report({'ERROR'},
                             '没有选中物理骨：到编辑/姿态模式选中要改的骨，再点这里')
                 return {'CANCELLED'}
-            key = context.scene.MT_PhysPreset
+            key = normalize_preset_key(context.scene.MT_PhysPreset)
             try:
                 new, ng, nn = apply_preset_selected(ctc, key, ids)
             except Exception as e:

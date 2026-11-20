@@ -697,7 +697,7 @@ class MT_PT_MainPanel(Panel):
         def sub(box, text, icon='DOT'):
             box.label(text=text, icon=icon)
 
-        if section('MT_UiIo', '模型', 'MESH_DATA', default=True):
+        if section('MT_UiIo', 'MOD 模型', 'MESH_DATA', default=True):
             box = layout.box()
             col = box.column(align=True)
             row = col.row(align=True)
@@ -734,7 +734,7 @@ class MT_PT_MainPanel(Panel):
                     _op.target_gender = scn.MT_TransplantGender
                     _op.out_dir = scn.MT_TransplantOutDir
 
-        if section('MT_UiTex', '贴图 (.tex)', 'IMAGE_DATA', default=False):
+        if section('MT_UiTex', 'TEX 贴图', 'IMAGE_DATA', default=False):
             try:
                 if not hasattr(ops, 'import_tex'):
                     box = layout.box()
@@ -763,7 +763,7 @@ class MT_PT_MainPanel(Panel):
                 box = layout.box()
                 box.label(text="贴图面板出错: %s: %s" % (type(_e).__name__, _e), icon='ERROR')
 
-        if section('MT_UiPhys', '物理骨骼', 'BONE_DATA', default=False):
+        if section('MT_UiPhys', 'CTC 物理骨骼', 'BONE_DATA', default=False):
             try:
                 if hasattr(ops, 'phys_matrix_auto'):
                     box = layout.box()
@@ -775,7 +775,7 @@ class MT_PT_MainPanel(Panel):
 
                     if hasattr(ops, 'phys_params_read'):
                         pb = layout.box()
-                        sub(pb, "物理参数（当前 CTC）", 'PHYSICS')
+                        sub(pb, "CTC 物理参数", 'PHYSICS')
                         cc = pb.column(align=True)
                         cc.operator("mt_framework.phys_params_read",
                                     text="读取当前参数", icon='FILE_REFRESH')
@@ -788,6 +788,9 @@ class MT_PT_MainPanel(Panel):
                         if hasattr(ops, 'phys_preset_apply_selected'):
                             cc.operator("mt_framework.phys_preset_apply_selected",
                                         text="套用预设（选中骨）", icon='BONE_DATA')
+                        if hasattr(scn, 'MT_PhysAutoInit'):
+                            cc.prop(scn, "MT_PhysAutoInit",
+                                    text="新链自动初值（按部位/链长）")
                         if hasattr(ops, 'phys_lock_selected'):
                             cc.operator("mt_framework.phys_lock_selected",
                                         text="锁死选中节点（只改角度，不动组）", icon='LOCKED')
@@ -815,7 +818,7 @@ class MT_PT_MainPanel(Panel):
 
                 if hasattr(ops, 'phys_custom_register'):
                     xb = layout.box()
-                    sub(xb, "自定义物理骨", 'OUTLINER_OB_ARMATURE')
+                    sub(xb, "CTC 自定义物理骨", 'OUTLINER_OB_ARMATURE')
                     xc = xb.column(align=True)
                     xc.operator("mt_framework.phys_custom_register",
                                 text="登记自定义物理骨", icon='BONE_DATA')
@@ -842,92 +845,99 @@ class MT_PT_MainPanel(Panel):
                         pass
 
                     xb = layout.box()
-                    sub(xb, "解算迭代（长头发 / 弯发束）", 'MOD_PHYSICS')
+                    sub(xb, "CTC 解算迭代（长头发 / 弯发束）", 'MOD_PHYSICS')
                     xb.prop(scn, 'MT_PhysIter', text="迭代次数")
 
                     xb = layout.box()
-                    sub(xb, "碰撞胶囊 CCL（头发↔身体避让）", 'MOD_PHYSICS')
-                    xb.prop(scn, 'MT_CclEnable',
-                            text="导出时写入身体胶囊（11 个，自动开 CTC 碰撞位）")
-                    try:
-                        from .MTframework_MHGU_ccl import parse_ccl as _parse_ccl, find_ccl as _find_ccl
-                        _ap = scn.get('MT_ArcPath', '') or ''
-                        _nc = _ccl_arc_count(_ap, _parse_ccl, _find_ccl)
-                        if _nc > 0:
-                            xb.label(text="当前 arc 已有 CCL：%d 个胶囊" % _nc, icon='CHECKMARK')
-                        elif _nc == 0:
-                            xb.label(text="当前 arc 没有 CCL 条目", icon='INFO')
-                    except Exception as _e:
-                        _ccl_note('面板检查 arc CCL 失败: %r' % (_e,))
-                        xb.label(text="arc CCL 检查失败：%s" % type(_e).__name__, icon='ERROR')
-
-                    _caps_all = _ccl_caps(scn)
-                    _n_custom = len(_caps_all)
-                    _ccl_ensure_handler(scn)
-                    row = xb.row(align=True)
-                    row.prop(scn, 'MT_CclIndex', text='#')
-                    row.prop(scn, 'MT_CclBoneA', text='骨A')
-                    row.prop(scn, 'MT_CclBoneB', text='骨B')
-                    xb.prop(scn, 'MT_CclRadius', text='半径', slider=True)
-                    xb.prop(scn, 'MT_CclStart', text='起点偏移')
-                    xb.prop(scn, 'MT_CclEnd', text='终点偏移')
-                    if _caps_all:
-                        _ci = max(0, min(_n_custom - 1, int(getattr(scn, 'MT_CclIndex', 0) or 0)))
-                        _sum = _ccl_summary(_caps_all[_ci], _ci)
-                        if bool(getattr(scn, 'MT_CclNewPending', False)):
-                            _sum += ' | 新骨待新增'
-                        xb.label(text=_sum, icon='CHECKMARK')
-                    else:
-                        xb.label(text='还没有自定义胶囊', icon='INFO')
-
-                    row = xb.row(align=True)
-                    _op = row.operator('mt_framework.ccl_capsule_step', text='◀ 上一条', icon='TRIA_LEFT')
-                    _op.step = -1
-                    _op = row.operator('mt_framework.ccl_capsule_step', text='下一条 ▶', icon='TRIA_RIGHT')
-                    _op.step = 1
-                    row = xb.row(align=True)
-                    row.operator('mt_framework.ccl_capsule_load', text='读取该项', icon='IMPORT')
-                    row.operator('mt_framework.ccl_capsule_read_bone', text='读取选中骨的胶囊', icon='BONE_DATA')
-                    row = xb.row(align=True)
-                    row.operator('mt_framework.ccl_capsule_store', text='应用修改', icon='CHECKMARK')
-                    row.operator('mt_framework.ccl_capsule_pick', text='A/B 取选中骨', icon='POSE_HLT')
-                    row.operator('mt_framework.ccl_capsule_import', text='读 arc 的 CCL', icon='FILE_REFRESH')
-                    row.operator('mt_framework.ccl_capsule_check', text='检查', icon='CHECKMARK')
-
-                    row = xb.row(align=True)
-                    row.operator('mt_framework.ccl_capsule_add', text='新增', icon='ADD')
-                    row.operator('mt_framework.ccl_capsule_del', text='删除', icon='REMOVE')
-                    row.operator('mt_framework.ccl_capsule_clear', text='清空', icon='X')
-                    row = xb.row(align=True)
-                    row.operator('mt_framework.ccl_capsule_zero', text='偏移归零', icon='LOOP_BACK')
-                    row.operator('mt_framework.ccl_capsule_swap', text='交换起终点', icon='ARROW_LEFTRIGHT')
-
-                    row = xb.row(align=True)
-                    row.operator('mt_framework.ccl_preview', text='生成胶囊示意', icon='SPHERE')
-                    row.operator('mt_framework.ccl_preview_clear', text='清除示意', icon='TRASH')
-                    row = xb.row(align=True)
-                    row.scale_y = 1.25
-                    row.operator('mt_framework.ccl_drag_sync', text='拖动同步（端点手柄）', icon='HAND')
-                    xb.prop(scn, 'MT_CclAutoSync', text='拖动实时同步（后台处理器）')
-                    xb.prop(scn, 'MT_CclAutoPreview', text='改动后自动更新示意')
-                    xb.prop(scn, 'MT_CclBodyPick', text='可选胶囊本体')
-                    xb.label(text=_ccl_diag_text(), icon='INFO')
-                    if _CCL_CHECK_TEXT:
-                        xb.label(text=_CCL_CHECK_TEXT[:120], icon='CHECKMARK')
-                    if _CCL_STAT.get('err'):
-                        xb.label(text='上次错误: %s' % str(_CCL_STAT['err'])[:90], icon='ERROR')
-
-                    xb = layout.box()
-                    sub(xb, "骨段碰撞（ShapeObject=2）", 'MOD_PHYSICS')
+                    sub(xb, "CTC 骨段碰撞（ShapeObject=2）", 'MOD_PHYSICS')
                     xb.prop(scn, 'MT_PhysSegment', text="链节用骨段碰撞（链尾仍是点）")
             except Exception as _e:
                 box = layout.box()
-                box.label(text="物理面板出错: %s: %s" % (type(_e).__name__, _e), icon='ERROR')
+                box.label(text="CTC 面板出错: %s: %s" % (type(_e).__name__, _e), icon='ERROR')
 
-        if section('MT_UiHelm', '头盔显示', 'MESH_CIRCLE', default=False):
+        if section('MT_UiCcl', 'CCL 碰撞胶囊', 'MOD_PHYSICS', default=False):
+            try:
+
+                xb = layout.box()
+                sub(xb, "CCL 碰撞胶囊（头发 ↔ 身体避让）", 'MOD_PHYSICS')
+                xb.prop(scn, 'MT_CclEnable',
+                        text="导出时写入身体胶囊（11 个，自动开 CTC 碰撞位）")
+                try:
+                    from .MTframework_MHGU_ccl import parse_ccl as _parse_ccl, find_ccl as _find_ccl
+                    _ap = scn.get('MT_ArcPath', '') or ''
+                    _nc = _ccl_arc_count(_ap, _parse_ccl, _find_ccl)
+                    if _nc > 0:
+                        xb.label(text="当前 arc 已有 CCL：%d 个胶囊" % _nc, icon='CHECKMARK')
+                    elif _nc == 0:
+                        xb.label(text="当前 arc 没有 CCL 条目", icon='INFO')
+                except Exception as _e:
+                    _ccl_note('面板检查 arc CCL 失败: %r' % (_e,))
+                    xb.label(text="arc CCL 检查失败：%s" % type(_e).__name__, icon='ERROR')
+
+                _caps_all = _ccl_caps(scn)
+                _n_custom = len(_caps_all)
+                _ccl_ensure_handler(scn)
+                row = xb.row(align=True)
+                row.prop(scn, 'MT_CclIndex', text='#')
+                row.prop(scn, 'MT_CclBoneA', text='骨A')
+                row.prop(scn, 'MT_CclBoneB', text='骨B')
+                xb.prop(scn, 'MT_CclRadius', text='半径', slider=True)
+                xb.prop(scn, 'MT_CclStart', text='起点偏移')
+                xb.prop(scn, 'MT_CclEnd', text='终点偏移')
+                if _caps_all:
+                    _ci = max(0, min(_n_custom - 1, int(getattr(scn, 'MT_CclIndex', 0) or 0)))
+                    _sum = _ccl_summary(_caps_all[_ci], _ci)
+                    if bool(getattr(scn, 'MT_CclNewPending', False)):
+                        _sum += ' | 新骨待新增'
+                    xb.label(text=_sum, icon='CHECKMARK')
+                else:
+                    xb.label(text='还没有自定义胶囊', icon='INFO')
+
+                row = xb.row(align=True)
+                _op = row.operator('mt_framework.ccl_capsule_step', text='◀ 上一条', icon='TRIA_LEFT')
+                _op.step = -1
+                _op = row.operator('mt_framework.ccl_capsule_step', text='下一条 ▶', icon='TRIA_RIGHT')
+                _op.step = 1
+                row = xb.row(align=True)
+                row.operator('mt_framework.ccl_capsule_load', text='读取该项', icon='IMPORT')
+                row.operator('mt_framework.ccl_capsule_read_bone', text='读取选中骨的胶囊', icon='BONE_DATA')
+                row = xb.row(align=True)
+                row.operator('mt_framework.ccl_capsule_store', text='应用修改', icon='CHECKMARK')
+                row.operator('mt_framework.ccl_capsule_pick', text='A/B 取选中骨', icon='POSE_HLT')
+                row.operator('mt_framework.ccl_capsule_import', text='读 arc 的 CCL', icon='FILE_REFRESH')
+                row.operator('mt_framework.ccl_capsule_check', text='检查', icon='CHECKMARK')
+
+                row = xb.row(align=True)
+                row.operator('mt_framework.ccl_capsule_add', text='新增', icon='ADD')
+                row.operator('mt_framework.ccl_capsule_del', text='删除', icon='REMOVE')
+                row.operator('mt_framework.ccl_capsule_clear', text='清空', icon='X')
+                row = xb.row(align=True)
+                row.operator('mt_framework.ccl_capsule_zero', text='偏移归零', icon='LOOP_BACK')
+                row.operator('mt_framework.ccl_capsule_swap', text='交换起终点', icon='ARROW_LEFTRIGHT')
+
+                row = xb.row(align=True)
+                row.operator('mt_framework.ccl_preview', text='生成胶囊示意', icon='SPHERE')
+                row.operator('mt_framework.ccl_preview_clear', text='清除示意', icon='TRASH')
+                row = xb.row(align=True)
+                row.scale_y = 1.25
+                row.operator('mt_framework.ccl_drag_sync', text='拖动同步（端点手柄）', icon='HAND')
+                xb.prop(scn, 'MT_CclAutoSync', text='拖动实时同步（后台处理器）')
+                xb.prop(scn, 'MT_CclAutoPreview', text='改动后自动更新示意')
+                xb.prop(scn, 'MT_CclBodyPick', text='可选胶囊本体')
+                xb.label(text=_ccl_diag_text(), icon='INFO')
+                if _CCL_CHECK_TEXT:
+                    xb.label(text=_CCL_CHECK_TEXT[:120], icon='CHECKMARK')
+                if _CCL_STAT.get('err'):
+                    xb.label(text='上次错误: %s' % str(_CCL_STAT['err'])[:90], icon='ERROR')
+
+            except Exception as _e:
+                box = layout.box()
+                box.label(text="碰撞胶囊面板出错: %s: %s" % (type(_e).__name__, _e), icon='ERROR')
+
+        if section('MT_UiHelm', 'XFS 头部显示', 'MESH_CIRCLE', default=False):
             try:
                 box = layout.box()
-                sub(box, "helm arc 的 XFS disp0 / disp1")
+                sub(box, "XFS 显示标志（disp0 / disp1）")
                 col = box.column(align=True)
                 col.prop(scn, "MT_HelmPreset", text="预设")
                 col.operator("mt_framework.helm_disp_preset",
@@ -962,9 +972,9 @@ class MT_PT_MainPanel(Panel):
                 r2.operator("mt_framework.cat_show_head", text="猫·不藏")
             except Exception as _e:
                 box = layout.box()
-                box.label(text="头盔面板出错: %s: %s" % (type(_e).__name__, _e), icon='ERROR')
+                box.label(text="XFS 面板出错: %s: %s" % (type(_e).__name__, _e), icon='ERROR')
 
-        if section('MT_UiVtx', '顶点组 / 名称', 'GROUP_BONE', default=True):
+        if section('MT_UiVtx', 'VWG 顶点组 / 名称', 'GROUP_BONE', default=True):
             try:
                 box = layout.box()
                 col = box.column(align=True)
@@ -1004,11 +1014,12 @@ class MT_PT_MainPanel(Panel):
             row.operator("mt_framework.refresh_filters", text="刷新过滤", icon='FILE_REFRESH')
 
 UI_SECTIONS = (
-    ('MT_UiIo', "模型", True),
-    ('MT_UiTex', "贴图 (.tex)", False),
-    ('MT_UiPhys', "物理骨骼", False),
-    ('MT_UiHelm', "头盔显示", False),
-    ('MT_UiVtx', "顶点组 / 名称", True),
+    ('MT_UiIo', "MOD 模型", True),
+    ('MT_UiTex', "TEX 贴图", False),
+    ('MT_UiPhys', "CTC 物理骨骼", False),
+    ('MT_UiCcl', "CCL 碰撞胶囊", False),
+    ('MT_UiHelm', "XFS 头部显示", False),
+    ('MT_UiVtx', "VWG 顶点组 / 名称", True),
     ('MT_UiSet', "导入设置", False),
 )
 
@@ -1582,6 +1593,13 @@ def _ccl_preview_signature(col=None):
 
 def _ccl_mod_bytes(context):
     sc = context.scene
+    try:
+        from .MTframework_MHGU_tpl import load_bytes as _tpl_load
+        _emb = _tpl_load(context)
+        if _emb:
+            return _emb
+    except Exception:
+        pass
     p = sc.get('MT_LastImportPath', '') or ''
     if p and os.path.isfile(p):
         try:

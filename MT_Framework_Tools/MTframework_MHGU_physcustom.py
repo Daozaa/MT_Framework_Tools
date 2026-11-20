@@ -15,7 +15,8 @@ except Exception:
 from .MTframework_MHGU_boneadd import _bounds, _worlds
 from .MTframework_MHGU_bones import bone_head_to_file_translation
 from .MTframework_MHGU_phys import remember_arc
-from .MTframework_MHGU_physparams import PHYS_PRESETS
+from .MTframework_MHGU_physparams import (PHYS_PRESETS, AUTO_PRESET_KEY, auto_chain_values,
+                                          DEFAULT_PRESET_KEY, normalize_preset_key)
 
 INFO = 24
 MAT = 64
@@ -155,8 +156,26 @@ def _node_bytes(jid, is_head, direction, preset, identity=False,
     struct.pack_into('<I', nd, 92, _FILL)
     return bytes(nd)
 
-def plan_custom_bones(mod_bytes, arm_obj, offset, preset_key='cloth_std',
-                      name_map=None, ctc_bytes=None, order=None):
+def _split_chains(ordered, new_names):
+    kids = {}
+    for b in ordered:
+        kids.setdefault(b.parent.name, []).append(b.name)
+    roots = [b.name for b in ordered if b.parent.name not in new_names]
+    chains, stack = [], [(r, [r]) for r in roots]
+    while stack:
+        cur, path = stack.pop()
+        ks = kids.get(cur, [])
+        if not ks:
+            chains.append(path)
+        else:
+            stack.append((ks[0], path + [ks[0]]))
+            for k in ks[1:]:
+                stack.append((k, [k]))
+    return chains
+
+def plan_custom_bones(mod_bytes, arm_obj, offset, preset_key=DEFAULT_PRESET_KEY,
+                      name_map=None, ctc_bytes=None, order=None,
+                      auto_init=False):
     from .MTframework_MHGU import get_armature_bone_name_map
     if name_map is None:
         try:
@@ -215,9 +234,25 @@ def plan_custom_bones(mod_bytes, arm_obj, offset, preset_key='cloth_std',
         if len(ordered) != len(new_bones):
             raise ValueError('新骨的父子关系里有环，无法排序')
 
+    rel = Matrix.Translation(-Vector(offset)) @ arm_obj.matrix_world
+    scale = t['scale']
+    worlds_all = {}
+    for b in new_bones:
+        p = rel @ b.head_local
+        at = bone_head_to_file_translation((p.x, p.y, p.z), scale)
+        worlds_all[b.name] = tuple(t['c'][k] - at[k] for k in range(3))
+
+    all_chains = _split_chains(ordered, new_names)
+    chains = all_chains
+
     used = {b['id'] for b in t['bones']}
     phys_used = [i for i in used if i >= PHYS_MIN]
     next_id = (max(phys_used) + 1) if phys_used else PHYS_MIN
+    available_slots = sum(1 for i in range(next_id, PHYS_MAX + 1) if i not in used)
+    if len(ordered) > available_slots:
+        raise ValueError('物理骨位不足：需要 %d 个新骨位，20~254 只剩 %d 个；'
+                         '请手动删减物理链或减少新骨，插件不会自动精简'
+                         % (len(ordered), available_slots))
     ids, slots = {}, {}
     for k, b in enumerate(ordered):
         while next_id in used:
@@ -228,24 +263,19 @@ def plan_custom_bones(mod_bytes, arm_obj, offset, preset_key='cloth_std',
         slots[b.name] = n + k
         used.add(next_id)
 
-    rel = Matrix.Translation(-Vector(offset)) @ arm_obj.matrix_world
-    scale = t['scale']
-    worlds = {}
-    for b in ordered:
-        p = rel @ b.head_local
-        at = bone_head_to_file_translation((p.x, p.y, p.z), scale)
-        worlds[b.name] = tuple(t['c'][k] - at[k] for k in range(3))
+    worlds = {b.name: worlds_all[b.name] for b in ordered}
 
     amat3 = [struct.unpack_from('<f', mod_bytes, t['amat'] + r * 16 + c * 4)[0]
              for r in range(3) for c in range(3)]
     n_info, n_lmat, n_amat = [], [], []
     for b in ordered:
         slot = slots[b.name]
-        if b.parent.name in slots:
-            par_slot = slots[b.parent.name]
-            par_world = worlds[b.parent.name]
+        par_name = b.parent.name
+        if par_name in slots:
+            par_slot = slots[par_name]
+            par_world = worlds[par_name]
         else:
-            par_slot = rec_of[b.parent.name]
+            par_slot = rec_of[par_name]
             par_world = t['bones'][par_slot]['world']
         world = worlds[b.name]
         local = tuple(world[k] - par_world[k] for k in range(3))
@@ -298,26 +328,15 @@ def plan_custom_bones(mod_bytes, arm_obj, offset, preset_key='cloth_std',
 
     bone_by_name = {b.name: b for b in ordered}
 
-    def kids(name):
-        return [b.name for b in ordered if b.parent.name == name]
-
-    chains, stack = [], [(r, [r]) for r in
-                         [b.name for b in ordered if b.parent.name not in slots]]
-    while stack:
-        cur, path = stack.pop()
-        ks = kids(cur)
-        if not ks:
-            chains.append(path)
-        else:
-
-            stack.append((ks[0], path + [ks[0]]))
-            for k in ks[1:]:
-                stack.append((k, [k]))
-
-    preset = PHYS_PRESETS.get(preset_key) or PHYS_PRESETS['cloth_std']
+    preset = PHYS_PRESETS.get(normalize_preset_key(preset_key)) or PHYS_PRESETS[DEFAULT_PRESET_KEY]
+    auto_init = auto_init or preset_key == AUTO_PRESET_KEY
     groups, nodes = [], []
     for path in chains:
-        groups.append(_group_bytes(len(path), preset))
+        if auto_init:
+            gp, values = auto_chain_values(path, [worlds[nm] for nm in path])
+        else:
+            gp, values = preset, None
+        groups.append(_group_bytes(len(path), gp))
         for i, nm in enumerate(path):
             world = worlds[nm]
             if i + 1 < len(path):
@@ -336,8 +355,9 @@ def plan_custom_bones(mod_bytes, arm_obj, offset, preset_key='cloth_std',
                     else:
                         pw = t['bones'][rec_of[parent_name]]['world']
                     d = [world[k] - pw[k] for k in range(3)]
-            nodes.append(_node_bytes(ids[nm], i == 0, d, preset,
-                                     identity=(len(path) > 1 and i + 1 == len(path))))
+            nodes.append(_node_bytes(ids[nm], i == 0, d, gp,
+                                     identity=(len(path) > 1 and i + 1 == len(path)),
+                                     values=(values[i] if values else None)))
 
     header, old_groups, old_nodes, tail = _split_ctc(ctc_bytes)
     all_groups = list(old_groups) + groups
@@ -350,7 +370,8 @@ def plan_custom_bones(mod_bytes, arm_obj, offset, preset_key='cloth_std',
     info = dict(chains=chains, ids=dict(ids), slots=dict(slots),
                 rename=rename,
                 names={ids[nm]: rename[nm] for nm in ids},
-                preset_name=preset[0])
+                auto_init=bool(auto_init),
+                preset_name=('自动·按部位/链长（重力0）' if auto_init else preset[0]))
     return bytes(out), new_ctc, info
 
 def _find_armature(context):
@@ -359,6 +380,11 @@ def _find_armature(context):
         if o.name.startswith('MT_Armature') or o.data.name.startswith('MT_Armature'):
             return o
     return objs[0] if objs else None
+
+def _scene_preset(sc):
+    if getattr(sc, 'MT_PhysAutoInit', False):
+        return AUTO_PRESET_KEY
+    return normalize_preset_key(getattr(sc, 'MT_PhysPreset', DEFAULT_PRESET_KEY))
 
 def _rename_bones(arm, rename):
     meshes = [o for o in bpy.data.objects if o.type == 'MESH']
@@ -437,7 +463,7 @@ def ensure_template(sc, arm, mod_bytes, off, preset):
         print('[MT] 自动重建模板失败（继续用旧模板）:', e)
     return mod_bytes
 
-def rebuild_template_from_armature(mod_bytes, arm_obj, offset, preset_key='cloth_std'):
+def rebuild_template_from_armature(mod_bytes, arm_obj, offset, preset_key=DEFAULT_PRESET_KEY):
     base = keep_body_bones(mod_bytes)
     names = sorted(arm_physics_names(arm_obj),
                    key=lambda nm: int(_PHYS_NAME_RE.match(nm).group(1)))
@@ -519,7 +545,7 @@ def _prepare_two_node_chains(arm, mod_bytes, offset, preset_key, ctc_bytes):
     singles = [c[0] for c in info['chains'] if len(c) == 1]
     return add_tip_bones(arm, singles)
 
-def complete_single_groups(mod_bytes, ctc_bytes, arm, offset, preset_key='cloth_std'):
+def complete_single_groups(mod_bytes, ctc_bytes, arm, offset, preset_key=DEFAULT_PRESET_KEY):
 
     if template_needs_rebuild(mod_bytes, arm):
         mod_bytes, _rebuilt = rebuild_template_only(mod_bytes, arm, offset, preset_key)
@@ -597,7 +623,7 @@ def complete_single_groups(mod_bytes, ctc_bytes, arm, offset, preset_key='cloth_
         if old_tip in info['ids']:
             tip_id[old_tip] = info['ids'][old_tip]
 
-    tpl = PHYS_PRESETS.get(preset_key) or PHYS_PRESETS['cloth_std']
+    tpl = PHYS_PRESETS.get(normalize_preset_key(preset_key)) or PHYS_PRESETS[DEFAULT_PRESET_KEY]
     new_groups = list(groups)
     out_nodes = []
     idx = 0
@@ -638,10 +664,23 @@ def complete_single_groups(mod_bytes, ctc_bytes, arm, offset, preset_key='cloth_
     info['made'] = made
     return new_mod, new_ctc, info
 
-def build_ctc_from_bones(mod_bytes, arm_obj, offset, preset_key='cloth_std',
+def build_ctc_from_bones(mod_bytes, arm_obj, offset, preset_key=DEFAULT_PRESET_KEY,
                          ctc_bytes=None):
     t = _parse(mod_bytes)
-    preset = PHYS_PRESETS.get(preset_key) or PHYS_PRESETS['cloth_std']
+    auto_init = preset_key == AUTO_PRESET_KEY
+    preset = PHYS_PRESETS.get(normalize_preset_key(preset_key)) or PHYS_PRESETS[DEFAULT_PRESET_KEY]
+    id2name = {}
+    try:
+        id2name = {int(k): str(v) for k, v in (arm_obj.get('MT_PhysIdMap') or {}).items()}
+    except Exception:
+        pass
+
+    def _bone_name(bid):
+        nm = id2name.get(bid)
+        if nm:
+            return nm
+        slot = mod_bytes[t['lut'] + bid] if bid < 256 else 0xFF
+        return ('b_%d' % (slot + 1)) if slot != 0xFF else ('b_%d' % bid)
     old = {}
     old_groups = []
     if ctc_bytes:
@@ -737,14 +776,19 @@ def build_ctc_from_bones(mod_bytes, arm_obj, offset, preset_key='cloth_std',
 
     groups, nodes = [], []
     for path in chains:
+        if auto_init:
+            names = [_bone_name(bid) for bid in path]
+            gp, values = auto_chain_values(names, [by_id[bid]['world'] for bid in path])
+        else:
+            gp, values = preset, None
 
-        _gp = preset
+        _gp = gp
         if old_groups:
             _best = max(old_groups, key=lambda t: len(t[0] & set(path)))
             if _best[0] & set(path):
                 _g = _best[1]
-                _gp = (preset[0], _g[0], _g[1], _g[2], _g[3], _g[4], _g[5], _g[6],
-                       preset[8], preset[9], preset[10])
+                _gp = (gp[0], _g[0], _g[1], _g[2], _g[3], _g[4], _g[5], _g[6],
+                       gp[8], gp[9], gp[10])
         groups.append(_group_bytes(len(path), _gp))
         for i, bid in enumerate(path):
             b = by_id[bid]
@@ -766,7 +810,9 @@ def build_ctc_from_bones(mod_bytes, arm_obj, offset, preset_key='cloth_std',
                 if sum(x * x for x in d) < 1e-8:
                     d = [0.0, -1.0, 0.0]
             _ax, _vals = old.get(bid, (None, None))
-            nodes.append(_node_bytes(bid, i == 0, d, preset, identity=ident,
+            if _vals is None and auto_init:
+                _vals = values[i]
+            nodes.append(_node_bytes(bid, i == 0, d, _gp, identity=ident,
                                      axis=_ax, values=_vals))
 
     header = bytearray(_CTC_HEAD_TMPL)
@@ -843,7 +889,7 @@ if bpy is not None:
             from .MTframework_MHGU_phys import recalled_arc
             off = get_object_center_offset(arm, sc)
             _arc, old_ctc = recalled_arc(context)
-            preset = getattr(sc, 'MT_PhysPreset', 'cloth_std')
+            preset = _scene_preset(sc)
 
             rebuilt = False
             if template_needs_rebuild(mod_bytes, arm):
@@ -971,7 +1017,7 @@ if bpy is not None:
                 return {'FINISHED'}
             from .MTframework_MHGU import get_object_center_offset
             off = get_object_center_offset(arm, sc)
-            preset = getattr(sc, 'MT_PhysPreset', 'cloth_std')
+            preset = _scene_preset(sc)
 
             try:
                 new_mod, info = rebuild_template_from_armature(mod, arm, off, preset)
@@ -1053,7 +1099,7 @@ if bpy is not None:
                 except Exception:
                     pass
             off = get_object_center_offset(arm, sc)
-            preset = getattr(sc, 'MT_PhysPreset', 'cloth_std')
+            preset = _scene_preset(sc)
 
             mod_bytes = ensure_template(sc, arm, mod_bytes, off, preset)
 
@@ -1136,7 +1182,7 @@ if bpy is not None:
                 return {'CANCELLED'}
             from .MTframework_MHGU import get_object_center_offset
             off = get_object_center_offset(arm, sc)
-            preset = getattr(sc, 'MT_PhysPreset', 'cloth_std')
+            preset = _scene_preset(sc)
 
             mod_bytes = ensure_template(sc, arm, mod_bytes, off, preset)
             from .MTframework_MHGU_phys import recalled_arc

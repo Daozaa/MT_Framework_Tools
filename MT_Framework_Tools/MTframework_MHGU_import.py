@@ -32,7 +32,31 @@ def _looks_like_normals(raw_list):
             good += 1
     return good >= 0.9 * len(raw_list)
 
-def import_mod_file(filepath, game_fix="mhgu"):
+def _store_influences(bone_id_array, bone_weight_array, index, pairs, max_slots=4):
+    acc = {}
+    for bid, w in pairs:
+        try:
+            bw = float(w)
+        except (TypeError, ValueError):
+            continue
+        if bid is None or int(bid) <= 0 or bw <= 0.0:
+            continue
+        key = int(bid)
+        acc[key] = acc.get(key, 0.0) + bw
+    if not acc:
+        bone_id_array[index] = []
+        bone_weight_array[index] = []
+        return
+    items = sorted(acc.items(), key=lambda kv: (-kv[1], kv[0]))[:max_slots]
+    total = sum(w for _, w in items)
+    if total <= 0.0:
+        bone_id_array[index] = []
+        bone_weight_array[index] = []
+        return
+    bone_id_array[index] = [bid for bid, _ in items]
+    bone_weight_array[index] = [w / total for _, w in items]
+
+def import_mod_file(filepath, game_fix="mhgu", sidecar_source=None):
 
     global mod_ver, hidedege, hidelod0, _last_import_path
 
@@ -45,8 +69,14 @@ def import_mod_file(filepath, game_fix="mhgu"):
         bpy.context.scene['MT_LastImportPath'] = filepath
 
         try:
-            from .MTframework_MHGU_tpl import store as _tpl_store
-            _tpl_store(bpy.context, filepath)
+            from .MTframework_MHGU_tpl import store as _tpl_store, materialize as _tpl_mat
+            _tpl_hash = _tpl_store(bpy.context, filepath)
+
+            if _tpl_hash:
+                _tpl_path = _tpl_mat(bpy.context)
+                if _tpl_path:
+                    _last_import_path = _tpl_path
+                    bpy.context.scene['MT_LastImportPath'] = _tpl_path
         except Exception:
             pass
 
@@ -486,57 +516,9 @@ def import_mod_file(filepath, game_fix="mhgu"):
 
                     w4 /= wt
 
-                b = [b1]
-
-                w = [w1]
-
-                if b2 not in b:
-
-                    b.append(b2)
-
-                    w.append(w2)
-
-                if b3 not in b:
-
-                    b.append(b3)
-
-                    w.append(w3)
-
-                if b4 not in b:
-
-                    b.append(b4)
-
-                    w.append(w4)
-
-                wa = sum(w)
-
-                if wa != 1.0:
-
-                    w[0] += 1.0 - wa
-
-                if len(b) == 1:
-
-                    BoneID_array[c] = [b1, b1, b1, b1]
-
-                    BoneWeight_array[c] = [w1, w1, w1, w1]
-
-                elif len(b) == 2:
-
-                    BoneID_array[c] = [b1, b[1], b1, b1]
-
-                    BoneWeight_array[c] = [w1, w[1], w1, w1]
-
-                elif len(b) == 3:
-
-                    BoneID_array[c] = [b1, b[1], b[2], b1]
-
-                    BoneWeight_array[c] = [w1, w[1], w[2], w1]
-
-                else:
-
-                    BoneID_array[c] = [b1, b[1], b[2], b[3]]
-
-                    BoneWeight_array[c] = [w1, w[1], w[2], w[3]]
+                _store_influences(
+                    BoneID_array, BoneWeight_array, c,
+                    [(b1, w1), (b2, w2), (b3, w3), (b4, w4)])
 
             MeshBoneLimit[i] = 4
 
@@ -870,51 +852,9 @@ def import_mod_file(filepath, game_fix="mhgu"):
 
                     w4 /= wt
 
-                b = [b1]
-
-                w = [w1]
-
-                if b2 not in b:
-
-                    b.append(b2)
-
-                    w.append(w2)
-
-                if b3 not in b:
-
-                    b.append(b3)
-
-                    w.append(w3)
-
-                if b4 not in b:
-
-                    b.append(b4)
-
-                    w.append(w4)
-
-                if len(b) == 1:
-
-                    BoneID_array[c] = [b1, b1, b1, b1]
-
-                    BoneWeight_array[c] = [w1, w1, w1, w1]
-
-                elif len(b) == 2:
-
-                    BoneID_array[c] = [b1, b[1], b1, b1]
-
-                    BoneWeight_array[c] = [w1, w[1], w1, w1]
-
-                elif len(b) == 3:
-
-                    BoneID_array[c] = [b1, b[1], b[2], b1]
-
-                    BoneWeight_array[c] = [w1, w[1], w[2], w1]
-
-                else:
-
-                    BoneID_array[c] = [b1, b[1], b[2], b[3]]
-
-                    BoneWeight_array[c] = [w1, w[1], w[2], w[3]]
+                _store_influences(
+                    BoneID_array, BoneWeight_array, c,
+                    [(b1, w1), (b2, w2), (b3, w3), (b4, w4)])
 
             MeshBoneLimit[i] = 4
 
@@ -1208,47 +1148,9 @@ def import_mod_file(filepath, game_fix="mhgu"):
 
                     top4_w = [w / wt for w in top4_w]
 
-                b = [top4_b[0]]
-
-                w = [top4_w[0]]
-
-                for j in range(1, 4):
-
-                    if top4_b[j] not in b:
-
-                        b.append(top4_b[j])
-
-                        w.append(top4_w[j])
-
-                wa = sum(w)
-
-                if wa != 1.0:
-
-                    w[0] += 1.0 - wa
-
-                if len(b) == 1:
-
-                    BoneID_array[c] = [b[0], b[0], b[0], b[0]]
-
-                    BoneWeight_array[c] = [w[0], w[0], w[0], w[0]]
-
-                elif len(b) == 2:
-
-                    BoneID_array[c] = [b[0], b[1], b[0], b[0]]
-
-                    BoneWeight_array[c] = [w[0], w[1], w[0], w[0]]
-
-                elif len(b) == 3:
-
-                    BoneID_array[c] = [b[0], b[1], b[2], b[0]]
-
-                    BoneWeight_array[c] = [w[0], w[1], w[2], w[0]]
-
-                else:
-
-                    BoneID_array[c] = [b[0], b[1], b[2], b[3]]
-
-                    BoneWeight_array[c] = [w[0], w[1], w[2], w[3]]
+                _store_influences(
+                    BoneID_array, BoneWeight_array, c,
+                    [(top4_b[j], top4_w[j]) for j in range(4)])
 
             MeshBoneLimit[i] = 4
 
@@ -1322,57 +1224,9 @@ def import_mod_file(filepath, game_fix="mhgu"):
 
                     w4 /= wt
 
-                b = [b1]
-
-                w = [w1]
-
-                if b2 not in b:
-
-                    b.append(b2)
-
-                    w.append(w2)
-
-                if b3 not in b:
-
-                    b.append(b3)
-
-                    w.append(w3)
-
-                if b4 not in b:
-
-                    b.append(b4)
-
-                    w.append(w4)
-
-                wa = sum(w)
-
-                if wa != 1.0:
-
-                    w[0] += 1.0 - wa
-
-                if len(b) == 1:
-
-                    BoneID_array[c] = [b1, b1, b1, b1]
-
-                    BoneWeight_array[c] = [w1, w1, w1, w1]
-
-                elif len(b) == 2:
-
-                    BoneID_array[c] = [b1, b[1], b1, b1]
-
-                    BoneWeight_array[c] = [w1, w[1], w1, w1]
-
-                elif len(b) == 3:
-
-                    BoneID_array[c] = [b1, b[1], b[2], b1]
-
-                    BoneWeight_array[c] = [w1, w[1], w[2], w1]
-
-                else:
-
-                    BoneID_array[c] = [b1, b[1], b[2], b[3]]
-
-                    BoneWeight_array[c] = [w1, w[1], w[2], w[3]]
+                _store_influences(
+                    BoneID_array, BoneWeight_array, c,
+                    [(b1, w1), (b2, w2), (b3, w3), (b4, w4)])
 
             MeshBoneLimit[i] = 4
 
@@ -1468,47 +1322,9 @@ def import_mod_file(filepath, game_fix="mhgu"):
 
                     top4_w = [w / wt for w in top4_w]
 
-                b = [top4_b[0]]
-
-                w = [top4_w[0]]
-
-                for j in range(1, 4):
-
-                    if top4_b[j] not in b:
-
-                        b.append(top4_b[j])
-
-                        w.append(top4_w[j])
-
-                wa = sum(w)
-
-                if wa != 1.0:
-
-                    w[0] += 1.0 - wa
-
-                if len(b) == 1:
-
-                    BoneID_array[c] = [b[0], b[0], b[0], b[0]]
-
-                    BoneWeight_array[c] = [w[0], w[0], w[0], w[0]]
-
-                elif len(b) == 2:
-
-                    BoneID_array[c] = [b[0], b[1], b[0], b[0]]
-
-                    BoneWeight_array[c] = [w[0], w[1], w[0], w[0]]
-
-                elif len(b) == 3:
-
-                    BoneID_array[c] = [b[0], b[1], b[2], b[0]]
-
-                    BoneWeight_array[c] = [w[0], w[1], w[2], w[0]]
-
-                else:
-
-                    BoneID_array[c] = [b[0], b[1], b[2], b[3]]
-
-                    BoneWeight_array[c] = [w[0], w[1], w[2], w[3]]
+                _store_influences(
+                    BoneID_array, BoneWeight_array, c,
+                    [(top4_b[j], top4_w[j]) for j in range(4)])
 
                 f.seek(4, os.SEEK_CUR)
 
@@ -1568,63 +1384,9 @@ def import_mod_file(filepath, game_fix="mhgu"):
 
                 f.seek(4, os.SEEK_CUR)
 
-                b = [b1]
-
-                w = [w1]
-
-                if b2 not in b:
-
-                    b.append(b2)
-
-                    w.append(w2)
-
-                if b3 not in b:
-
-                    b.append(b3)
-
-                    w.append(w3)
-
-                if b4 not in b:
-
-                    b.append(b4)
-
-                    w.append(w4)
-
-                wt = sum(w)
-
-                if wt > 0:
-
-                    w = [x / wt for x in w]
-
-                wa = sum(w)
-
-                if wa != 1.0:
-
-                    w[0] += 1.0 - wa
-
-                if len(b) == 1:
-
-                    BoneID_array[c] = [b[0], b[0], b[0], b[0]]
-
-                    BoneWeight_array[c] = [w[0], w[0], w[0], w[0]]
-
-                elif len(b) == 2:
-
-                    BoneID_array[c] = [b[0], b[1], b[0], b[0]]
-
-                    BoneWeight_array[c] = [w[0], w[1], w[0], w[0]]
-
-                elif len(b) == 3:
-
-                    BoneID_array[c] = [b[0], b[1], b[2], b[0]]
-
-                    BoneWeight_array[c] = [w[0], w[1], w[2], w[0]]
-
-                else:
-
-                    BoneID_array[c] = [b[0], b[1], b[2], b[3]]
-
-                    BoneWeight_array[c] = [w[0], w[1], w[2], w[3]]
+                _store_influences(
+                    BoneID_array, BoneWeight_array, c,
+                    [(b1, w1), (b2, w2), (b3, w3), (b4, w4)])
 
             MeshBoneLimit[i] = 4
 
@@ -1665,6 +1427,13 @@ def import_mod_file(filepath, game_fix="mhgu"):
             Armature = build_armature(
                 "MT_Armature", BoneArray, BoneWorldMatrices, Mtp, _dequant)
             print("骨架已创建: {} 根骨骼 (反量化系数 {:.5f})".format(bCount, _dequant))
+
+            if sidecar_source:
+                try:
+                    from . import MTframework_MHGU_bontails as _bontails
+                    _bontails.apply(Armature, sidecar_source)
+                except Exception as _e_tail:
+                    print("骨骼尾端 sidecar 应用失败: {}".format(_e_tail))
         except Exception as _e:
             print("创建骨架失败, 退回空物体表示: {}".format(_e))
             import traceback

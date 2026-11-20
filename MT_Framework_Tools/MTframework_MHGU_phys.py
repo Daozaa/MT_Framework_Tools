@@ -289,6 +289,7 @@ except Exception:
     bpy = None
 
 def _apply(operator, context, filepath):
+    sidecar_source = filepath
     low = filepath.lower()
     if low.endswith('.arc'):
         try:
@@ -307,7 +308,7 @@ def _apply(operator, context, filepath):
         return False
     from .MTframework_MHGU_import import import_mod_file
     props = context.scene.MT_Framework_Props
-    import_mod_file(filepath, props.game_fix)
+    import_mod_file(filepath, props.game_fix, sidecar_source=sidecar_source)
     return True
 
 def _phys_armature(context):
@@ -339,7 +340,11 @@ def _ensure_template(operator, context):
         arm = _phys_armature(context)
         if arm is None:
             return
-        tpl = context.scene.get('MT_LastImportPath', '') or ''
+        try:
+            from .MTframework_MHGU_tpl import sync as _tpl_sync
+            tpl = _tpl_sync(context, verbose=False)
+        except Exception:
+            tpl = context.scene.get('MT_LastImportPath', '') or ''
         if not tpl or not os.path.exists(tpl):
             return
         with open(tpl, 'rb') as f:
@@ -356,7 +361,8 @@ def _ensure_template(operator, context):
         if not need and not mismatch:
             return
         off = get_object_center_offset(arm, context.scene)
-        preset = getattr(context.scene, 'MT_PhysPreset', 'cloth_std')
+        preset = ('auto' if getattr(context.scene, 'MT_PhysAutoInit', False)
+                  else getattr(context.scene, 'MT_PhysPreset', 'auto_other'))
         renamed = ''
         if need and not mismatch:
             new_mod, _info = rebuild_template_only(mod, arm, off, preset)
@@ -421,6 +427,7 @@ def _export(operator, context, filepath):
             operator.report({'ERROR'}, '导出失败: 找不到模板文件 (请先导入一个 .mod)')
         return None
     arc_path, ctc_bytes = recalled_arc(context)
+    _tail_target = None
 
     if not arc_path:
         _last = context.scene.get('MT_ArcPathLast', '') or ''
@@ -445,7 +452,7 @@ def _export(operator, context, filepath):
                 _b0 = build_ctc_from_bones(
                     _mb0x, _arm0,
                     get_object_center_offset(_arm0, context.scene),
-                    getattr(context.scene, 'MT_PhysPreset', 'cloth_std'))
+                    getattr(context.scene, 'MT_PhysPreset', 'auto_other'))
                 if _b0 and len(_b0) > 0x3C:
                     _ctc = _b0
                     ctc_bytes = _b0
@@ -566,7 +573,7 @@ def _export(operator, context, filepath):
                         _built = build_ctc_from_bones(
                             _mod_bytes, _arm2,
                             get_object_center_offset(_arm2, context.scene),
-                            getattr(context.scene, 'MT_PhysPreset', 'cloth_std'),
+                            getattr(context.scene, 'MT_PhysPreset', 'auto_other'),
                             ctc_bytes=_ctc)
                 except Exception as _e2:
                     print('[MT] 按模板重建 CTC 失败:', _e2)
@@ -670,6 +677,7 @@ def _export(operator, context, filepath):
             else:
                 dst = os.path.splitext(filepath)[0] + '.arc'
             new_arc = export_arc(context, arc_path, out, mod_bytes, dst)
+            _tail_target = new_arc
             if want_arc:
 
                 try:
@@ -690,6 +698,14 @@ def _export(operator, context, filepath):
         return None
     else:
         operator.report({'INFO'}, '已导出: %s' % out)
+        _tail_target = out
+
+    try:
+        if _tail_target and os.path.exists(_tail_target):
+            from .MTframework_MHGU_bontails import write as _tail_write
+            _tail_write(_tail_target, _phys_armature(context))
+    except Exception as _e_tail:
+        print('[MT] 骨骼尾端 sidecar 跳过:', _e_tail)
     return out
 
 if bpy is not None:

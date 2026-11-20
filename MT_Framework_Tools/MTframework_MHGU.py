@@ -960,6 +960,11 @@ def register():
     except Exception as _e:
         print("NOTE: .arc/物理模块未启用 (%s)" % _e)
     try:
+        from . import MTframework_MHGU_tpl
+        MTframework_MHGU_tpl.register()
+    except Exception as _e:
+        print("NOTE: 模板自愈未启用 (%s)" % _e)
+    try:
         from . import MTframework_MHGU_tex
         MTframework_MHGU_tex.register()
     except Exception as _e:
@@ -999,6 +1004,11 @@ def unregister():
     try:
         from . import MTframework_MHGU_tex
         MTframework_MHGU_tex.unregister()
+    except Exception:
+        pass
+    try:
+        from . import MTframework_MHGU_tpl
+        MTframework_MHGU_tpl.unregister()
     except Exception:
         pass
     from . import MTframework_MMD

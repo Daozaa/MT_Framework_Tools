@@ -410,14 +410,17 @@ def export_mod_file(filepath, game_fix="mhgu", template_path=None):
     if filepath and not filepath.endswith(".new"):
         filepath = filepath + ".new"
 
+    _synced = None
     try:
         from .MTframework_MHGU_tpl import sync as _tpl_sync
-        _tpl_sync(bpy.context)
+        _synced = _tpl_sync(bpy.context)
     except Exception:
         pass
     from .MTframework_MHGU_import import _last_import_path
     sv = bpy.context.scene.get('MT_LastImportPath', None)
-    cand = [p for p in [template_path, _last_import_path, sv] if p and os.path.exists(p)]
+
+    cand = [p for p in [template_path, _synced, sv, _last_import_path]
+            if p and os.path.exists(p)]
 
     cand = [p for p in cand if not p.endswith(".new")]
     src = cand[0] if cand else (filepath if os.path.exists(filepath) else None)

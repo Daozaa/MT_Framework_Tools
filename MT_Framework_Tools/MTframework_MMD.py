@@ -854,6 +854,7 @@ class MT_PT_MMDPanel(Panel):
     bl_region_type = 'UI'
     bl_category = "MTFramework"
     bl_parent_id = "MT_PT_MainPanel"
+    bl_options = {'DEFAULT_CLOSED'}
 
     def draw(self, context):
         layout = self.layout
