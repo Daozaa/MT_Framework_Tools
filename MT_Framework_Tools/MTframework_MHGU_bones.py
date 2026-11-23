@@ -417,14 +417,13 @@ def check_export(data, ptr_bone, bone_count, plan, mesh_objs, coff=None,
             dw = max(dw, max(abs(v[k] - o[k]) for k in range(3)))
         info['bone_delta'] = dw
         mag = max(1.0, max(max(abs(x) for x in w) for w in sec['world_t']))
-        if dw > 1e-4 * mag + 1e-4:
-            msgs.append(
-                "骨架相对模板挪动了 (最大 %.4f 文件单位)。如果这**不是**你有意"
-                "移动的, 角色在游戏里的落点会跟着变 —— 请把骨架对回原位再导出。"
-                % dw)
         r = plan.get('root')
         info['root_old'] = sec['world_t'][r] if r is not None else None
         info['root_new'] = plan['new_world'][r] if r is not None else None
+        if r is not None:
+            root_delta = max(abs(a - b) for a, b in zip(info['root_old'], info['root_new']))
+            if root_delta > 1e-4 * mag + 1e-4:
+                msgs.append('根骨相对模板移动了 %.4f 文件单位，请核对角色落点。' % root_delta)
         info['moved_bones'] = sum(
             1 for i in range(n)
             if plan['new_world'][i] != sec['world_t'][i]

@@ -8,6 +8,9 @@ from .MTframework_MHGU import (get_skin_weights, float_to_short,
                                vertex_data_modified, remember_vertex_fingerprint,
                                vertex_normals_file_space, vertex_tangents_file_space)
 
+_SINGLE_BONE_FVF = {0xB0983013, 0xB0983014, 0xA8FAB018, 0xA8FAB019,
+                    0x0CB6800E, 0x0CB68015, 0x0CB68016}
+
 def _bone_no_from_name(name):
     if not name or not name.startswith('b_'):
         return None
@@ -406,7 +409,37 @@ def split_hidden_meshes(objs):
             keep.append(o)
     return keep, hidden
 
-def export_mod_file(filepath, game_fix="mhgu", template_path=None):
+def _mesh_triangles(mesh, loop_vertices):
+    for poly in mesh.polygons:
+        indices = (tuple(loop_vertices[i] for i in poly.loop_indices)
+                   if loop_vertices is not None else poly.vertices)
+        for i in range(1, len(indices) - 1):
+            yield indices[0], indices[i], indices[i + 1]
+
+def _mesh_parts(mesh, loop_vertices, vertices, stride, count):
+    triangles = _mesh_triangles(mesh, loop_vertices)
+    if count <= 0xFFFF:
+        yield vertices, count, triangles
+        return
+    remap = {}
+    buffer = bytearray()
+    faces = []
+    for tri in triangles:
+        missing = [v for v in dict.fromkeys(tri) if v not in remap]
+        if len(remap) + len(missing) > 0xFFFF:
+            yield buffer, len(remap), faces
+            remap, buffer, faces = {}, bytearray(), []
+            missing = dict.fromkeys(tri)
+        for v in missing:
+            remap[v] = len(remap)
+            at = v * stride
+            buffer.extend(vertices[at:at + stride])
+        faces.append(tuple(remap[v] for v in tri))
+    if faces:
+        yield buffer, len(remap), faces
+
+def export_mod_file(filepath, game_fix="mhgu", template_path=None, *, expect_atlas_uv=False,
+                    report=None):
     if filepath and not filepath.endswith(".new"):
         filepath = filepath + ".new"
 
@@ -438,6 +471,9 @@ def export_mod_file(filepath, game_fix="mhgu", template_path=None):
 
         _tpl_bytes = bytes(data)
     hdr = MODHeader(); hdr.marshall(BytesIO(data[6:6+58]))
+
+    remapped_slots = any(o.type == 'ARMATURE' and o.get('MT_PhysBridgeReslot')
+                         and len(o.data.bones) == hdr.boneCount for o in bpy.context.scene.objects)
 
     headers = []
     for i in range(hdr.meshCount):
@@ -543,6 +579,11 @@ def export_mod_file(filepath, game_fix="mhgu", template_path=None):
         print('NOTE: 选中的网格都被跳过了（名字以 _OLD 结尾 / 没有顶点 / 没有分件槽可用）'
               ' → 导出空模型')
 
+    if expect_atlas_uv:
+        dropped = [o.name for o in sel if o.data.polygons and o not in sm.values()]
+        if not sm or dropped:
+            raise ValueError('有图集网格没有分件槽：' + ('、'.join(dropped) or '没有可导出的网格'))
+
     new_vert = bytearray()
     new_face = bytearray()
     rb = 0; rf = 0
@@ -599,12 +640,6 @@ def export_mod_file(filepath, game_fix="mhgu", template_path=None):
                          sum(1 for s in _per.values() if len(s) > 1)))
         _vc_out = len(_split)
 
-        pad = (vs - (rb % vs)) % vs
-        if pad > 0:
-            new_vert += b'\x00' * pad
-            rb += pad
-        vs_start = rb // vs
-
         _use_orig = False
         try: _use_orig = bpy.context.scene.MT_Framework_Props.use_orig_vert
         except: pass
@@ -623,15 +658,19 @@ def export_mod_file(filepath, game_fix="mhgu", template_path=None):
 
         _changed = vertex_data_modified(obj)
         _can_reencode = fvf in _known_fvfs
+        if expect_atlas_uv and (_use_orig or not _can_reencode):
+            cause = '已开启「使用原版顶点」' if _use_orig else 'FVF 0x%08X 无法重编码' % fvf
+            raise ValueError('「%s」无法写入图集 UV：%s' % (obj.name, cause))
+        if remapped_slots and (_use_orig or not _can_reencode):
+            cause = '请关闭「使用原版顶点」' if _use_orig else 'FVF 0x%08X 无法重新写入骨索引' % fvf
+            raise ValueError('「%s」添加连接骨后需要重写权重索引：%s' % (obj.name, cause))
         if _changed and not _can_reencode:
             print("WARNING: Mesh %d FVF 0x%08x 不支持重新编码, 顶点修改会被忽略" % (i, fvf))
         _reencode = (not _use_orig) and _can_reencode and (
-            _changed or not (vc == _tpl.vertCount))
+            expect_atlas_uv or remapped_slots or _changed or not (vc == _tpl.vertCount))
         if not _reencode:
             src_off = hdr.ptr_vertex + _tpl.vertStart * vs + _tpl.vertBase
             vert_data = bytes(data[src_off:src_off + _tpl.vertCount * vs])
-            new_vert += vert_data
-            rb += len(vert_data)
         else:
 
             na = vertex_normals_file_space(obj)
@@ -767,66 +806,74 @@ def export_mod_file(filepath, game_fix="mhgu", template_path=None):
                       "请把模型整体缩放约 %.4f (S 键输入 %.4f) 再导出。"
                       % (obj.name, _mx, _fit, _fit))
 
+            _weight_limit = 1 if fvf in _SINGLE_BONE_FVF else 4
             try:
                 _over = 0
                 _mx = 0.0
                 for _vi in range(len(md.vertices)):
                     _b0, _w0 = get_skin_weights(obj, _vi)
                     _pr = [ww for xx, ww in zip(_b0, _w0) if xx in bm and ww > 0.0]
-                    if len(_pr) > 4:
+                    if len(_pr) > _weight_limit:
                         _tot = sum(_pr)
                         if _tot > 0.0:
-                            _over += 1
-                            _d = 1.0 - sum(sorted(_pr, reverse=True)[:4]) / _tot
+                            _d = 1.0 - sum(sorted(_pr, reverse=True)[:_weight_limit]) / _tot
+                            _over += (_d > 1e-4 if _weight_limit == 1 else 1)
                             if _d > _mx:
                                 _mx = _d
                 if _over:
-                    print('NOTE: 网格 %s 权重精简：%d 个顶点超过 4 根骨，'
-                          '最大丢弃权重 %.4f（导出按前 4 根归一化）'
-                          % (obj.name, _over, _mx))
+                    if _weight_limit == 1:
+                        message = ('「%s」第 %d 槽只存单骨权重（FVF 0x%08X），'
+                                   '%d 个顶点会丢失混合权重。可改用支持多骨权重的可见分件槽。'
+                                   % (obj.name, i + 1, fvf, _over))
+                        print('WARNING: %s 最大丢弃权重 %.4f' % (message, _mx))
+                        if report is not None:
+                            report({'WARNING'}, message)
+                    else:
+                        print('NOTE: 网格 %s 权重精简：%d 个顶点超过 4 根骨，'
+                              '最大丢弃权重 %.4f（导出按前 4 根归一化）'
+                              % (obj.name, _over, _mx))
             except Exception as _e_w:
                 print('[MT] 权重诊断跳过：%s' % _e_w)
             vert_data = _write_vbuf(fvf, _vc_out, gp, gu, gn, gt, gsk, vs)
-            new_vert += vert_data
-            rb += len(vert_data)
 
-        fc = 0
-        for poly in md.polygons:
+        if len(vert_data) != _vc_out * vs:
+            raise ValueError('「%s」的顶点数与模板数据不符，请关闭「使用原版顶点」或选择支持的 FVF' % obj.name)
+        for part_data, count, triangles in _mesh_parts(md, _loop_vert, vert_data, vs, _vc_out):
+            pad = (-rb) % vs
+            new_vert.extend(b'\0' * pad)
+            rb += pad
 
-            _li = poly.loop_indices if _loop_vert is not None else None
-            for j in range(len(poly.vertices) - 2):
-                if _li is not None:
-                    v0 = _loop_vert[_li[0]] + vs_start
-                    v1 = _loop_vert[_li[j + 1]] + vs_start
-                    v2 = _loop_vert[_li[j + 2]] + vs_start
-                else:
-                    v0 = poly.vertices[0] + vs_start
-                    v1 = poly.vertices[j + 1] + vs_start
-                    v2 = poly.vertices[j + 2] + vs_start
-                if fc > 0:
-                    new_face += struct.pack('<H', 0xFFFF); fc += 1
-                new_face += struct.pack('<HHH', v0, v1, v2)
+            start = rb // vs
+            base = 0
+            if _vc_out > 0xFFFF or start + count > 0xFFFF:
+                start, base = 0, rb
+            new_vert.extend(part_data)
+            rb += len(part_data)
+
+            fc = 0
+            for v0, v1, v2 in triangles:
+                if fc:
+                    new_face.extend(b'\xff\xff')
+                    fc += 1
+                new_face.extend(struct.pack('<HHH', v0 + start, v1 + start, v2 + start))
                 fc += 3
 
-        mh = MeshHeaderStruct()
-        for attr in ['meshtype','unk01','MatId','lodLevel','unk04','vertFlag',
-                     'vertStride','unk05','fvfInfo','bonemapindex','weightmaps',
-                     'unk07','unk08','unk09']:
-            setattr(mh, attr, getattr(_tpl, attr))
-        try:
+            mh = MeshHeaderStruct()
+            for attr in ['meshtype', 'unk01', 'MatId', 'lodLevel', 'unk04', 'vertFlag',
+                         'vertStride', 'unk05', 'fvfInfo', 'bonemapindex', 'weightmaps',
+                         'unk07', 'unk08', 'unk09']:
+                setattr(mh, attr, getattr(_tpl, attr))
             if getattr(bpy.context.scene.MT_Framework_Props, 'all_visible', False):
-
-                if getattr(_tpl, 'vertStride', 0) >= 20:
+                if vs >= 20:
                     mh.meshtype = 0xEFFF
                 else:
                     _skipped_visible.append(i)
-        except Exception:
-            pass
-        mh.vertCount=_vc_out; mh.faceCount=fc
-        mh.vertStart=vs_start; mh.vertBase=0
-        mh.faceStart=rf; mh.faceBase=0
-        mh.min_index=vs_start; mh.max_index=vs_start+_vc_out-1 if _vc_out>0 else 0
-        new_headers_list.append(mh); rf+=fc
+            mh.vertCount, mh.faceCount = count, fc
+            mh.vertStart, mh.vertBase = start, base
+            mh.faceStart, mh.faceBase = rf, 0
+            mh.min_index, mh.max_index = start, start + count - 1 if count else 0
+            new_headers_list.append(mh)
+            rf += fc
 
     if _skipped_visible:
         print("NOTE: 这些分件是纯深度件（无 UV/法线），没有强行设成可见: %s"
@@ -838,7 +885,10 @@ def export_mod_file(filepath, game_fix="mhgu", template_path=None):
     _pad = int(hdr.vertexBufferSize) - _tpl_used
     if _pad < 0:
         _pad = 0
+    extra_headers = max(0, len(new_headers_list) - len(headers)) * 48
+    ptr_vertex = hdr.ptr_vertex + extra_headers
     _new = bytearray(data[:hdr.ptr_vertex])
+    _new += b'\0' * extra_headers
     _new += bytes(new_vert)
     if _pad:
         _new += b'\x00' * _pad
@@ -850,7 +900,8 @@ def export_mod_file(filepath, game_fix="mhgu", template_path=None):
     struct.pack_into('<I', data, 16, ntc)
     struct.pack_into('<I', data, 56, npt)
     struct.pack_into('<I', data, 60, len(data) - 4)
-    struct.pack_into('<I', data, 24, npt - hdr.ptr_vertex)
+    struct.pack_into('<I', data, 52, ptr_vertex)
+    struct.pack_into('<I', data, 24, npt - ptr_vertex)
 
     hdr_data = bytearray()
     total_vc = 0
@@ -944,7 +995,7 @@ def export_mod_file(filepath, game_fix="mhgu", template_path=None):
             print("  根骨 world %s -> %s"
                   % (tuple(round(x, 3) for x in _info['root_old']),
                      tuple(round(x, 3) for x in _info['root_new'])))
-        print("  骨架相对模板挪动 %.5f 文件单位"
+        print("  单根关节相对模板最大改动 %.5f 文件单位"
               % _info.get('bone_delta', 0.0))
         if _info.get('amat_c') is not None:
 

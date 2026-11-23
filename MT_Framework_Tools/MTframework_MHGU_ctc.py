@@ -137,12 +137,12 @@ def write_file(ctc: Ctc, path):
         f.write(ctc.encode())
 
 def filter_nodes(data: bytes, keep_ids) -> bytes:
-    if not data or data[:4] != MAGIC:
+    if not data or data[:4] != MAGIC or len(data) < 0x3C:
         return data
     keep = {int(x) for x in keep_ids}
     n_g = struct.unpack_from('<I', data, 0x10)[0]
     n_c = struct.unpack_from('<I', data, 0x14)[0]
-    if n_g > 64 or n_c > 4096:
+    if n_g > n_c or n_c > 4096:
         return data
     g_off = 0x3C
     c_off = g_off + 80 * n_g
@@ -155,7 +155,7 @@ def filter_nodes(data: bytes, keep_ids) -> bytes:
         raw = bytes(data[g_off + 80 * g: g_off + 80 * (g + 1)])
         cnt = struct.unpack_from('<I', raw, 0)[0]
         if cnt <= 0 or idx + cnt > n_c:
-            break
+            return data
         grp_nodes = [bytes(data[c_off + 96 * k: c_off + 96 * (k + 1)])
                      for k in range(idx, idx + cnt)]
         idx += cnt
@@ -163,6 +163,8 @@ def filter_nodes(data: bytes, keep_ids) -> bytes:
         if all(i in keep for i in ids):
             groups.append(raw)
             nodes.extend(grp_nodes)
+    if idx != n_c:
+        return data
     if not groups:
         print('[MT] CTC 过滤：所有链组都引用了不存在的骨，整份丢弃')
         return b''
@@ -307,7 +309,7 @@ def set_segment_shapes(data: bytes, on=True):
     n_c = struct.unpack_from('<I', data, 0x14)[0]
     g_off = 0x3C
     c_off = g_off + 80 * n_g
-    if n_g <= 0 or n_c <= 0 or n_g > 64 or n_c > 4096:
+    if n_g <= 0 or n_c <= 0 or n_g > n_c or n_c > 4096:
         return data, 0, 0, 0
     if len(data) < c_off + 96 * n_c:
         return data, 0, 0, 0
@@ -318,15 +320,19 @@ def set_segment_shapes(data: bytes, on=True):
     for g in range(n_g):
         cnt = struct.unpack_from('<I', data, g_off + 80 * g)[0]
         if cnt <= 0 or idx + cnt > n_c:
-            break
+            return data, 0, 0, 0
         groups += 1
         for j in range(cnt):
             o = c_off + 96 * (idx + j) + 6
-            shape = 2 if (on and j + 1 < cnt) else 1
+            locked_helper = (struct.unpack_from('<f', data, o + 2)[0] == 0.0
+                             and struct.unpack_from('<f', data, o + 74)[0] == 0.0)
+            shape = 2 if on and j + 1 < cnt and not locked_helper else 1
             if out[o] != shape:
                 out[o] = shape
                 changed += 1
         idx += cnt
+    if idx != n_c:
+        return data, 0, 0, 0
     head = 3 if on else 1
     if out[54] != head:
         out[54] = head

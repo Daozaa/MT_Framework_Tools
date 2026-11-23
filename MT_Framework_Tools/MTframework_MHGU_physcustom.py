@@ -79,7 +79,7 @@ def _split_ctc(ctc):
         return bytearray(_CTC_HEAD_TMPL), [], [], b''
     ng = struct.unpack_from('<I', ctc, 0x10)[0]
     nc = struct.unpack_from('<I', ctc, 0x14)[0]
-    if ng > 64 or nc > 4096:
+    if ng > 4096 or nc > 4096:
         raise ValueError('现有 CTC 头异常（组 %d / 节点 %d）' % (ng, nc))
     g_off = HDR_SZ
     n_off = HDR_SZ + GROUP_SZ * ng
@@ -173,18 +173,13 @@ def _split_chains(ordered, new_names):
                 stack.append((k, [k]))
     return chains
 
-def plan_custom_bones(mod_bytes, arm_obj, offset, preset_key=DEFAULT_PRESET_KEY,
-                      name_map=None, ctc_bytes=None, order=None,
-                      auto_init=False):
+def _custom_records(arm_obj, bone_count, name_map=None):
     from .MTframework_MHGU import get_armature_bone_name_map
     if name_map is None:
         try:
             name_map = get_armature_bone_name_map(arm_obj)
         except Exception:
             name_map = {}
-
-    t = _parse(mod_bytes)
-    n = t['n']
 
     _bre = re.compile(r'^b_(\d+)(?:\.[lr])?$')
     rec_of = {}
@@ -194,8 +189,26 @@ def plan_custom_bones(mod_bytes, arm_obj, offset, preset_key=DEFAULT_PRESET_KEY,
             m = _bre.match(b.name)
             if m:
                 rec = int(m.group(1)) - 1
-        if rec is not None and 0 <= rec < n:
+        if rec is not None and 0 <= rec < bone_count:
             rec_of[b.name] = rec
+    return rec_of
+
+def _available_phys_ids(template):
+    used = {b['id'] for b in template['bones']}
+    highest = max(used, default=PHYS_MIN - 1)
+    start = max(PHYS_MIN, highest + 1)
+    return [i for i in range(start, PHYS_MAX + 1)] + [
+        i for i in range(PHYS_MIN, min(start, PHYS_MAX + 1)) if i not in used]
+
+def _physical_budget(template, total=255):
+    return min(len(_available_phys_ids(template)), total - template['n'])
+
+def plan_custom_bones(mod_bytes, arm_obj, offset, preset_key=DEFAULT_PRESET_KEY,
+                      name_map=None, ctc_bytes=None, order=None,
+                      auto_init=False):
+    t = _parse(mod_bytes)
+    n = t['n']
+    rec_of = _custom_records(arm_obj, n, name_map)
     new_bones = [b for b in arm_obj.data.bones if b.name not in rec_of]
     if not new_bones:
         raise ValueError('骨架里没有新骨：先在编辑模式加骨、摆好位置与父子，再点登记')
@@ -245,23 +258,15 @@ def plan_custom_bones(mod_bytes, arm_obj, offset, preset_key=DEFAULT_PRESET_KEY,
     all_chains = _split_chains(ordered, new_names)
     chains = all_chains
 
-    used = {b['id'] for b in t['bones']}
-    phys_used = [i for i in used if i >= PHYS_MIN]
-    next_id = (max(phys_used) + 1) if phys_used else PHYS_MIN
-    available_slots = sum(1 for i in range(next_id, PHYS_MAX + 1) if i not in used)
+    available_slots = _physical_budget(t)
     if len(ordered) > available_slots:
-        raise ValueError('物理骨位不足：需要 %d 个新骨位，20~254 只剩 %d 个；'
-                         '请手动删减物理链或减少新骨，插件不会自动精简'
+        raise ValueError('物理骨位不足：需要 %d 个新骨位，只剩 %d 个；'
+                         '可在登记时开启超限对半融并'
                          % (len(ordered), available_slots))
     ids, slots = {}, {}
-    for k, b in enumerate(ordered):
-        while next_id in used:
-            next_id += 1
-        if next_id > PHYS_MAX:
-            raise ValueError('物理骨 id 用尽（20~254）')
-        ids[b.name] = next_id
+    for k, (b, bid) in enumerate(zip(ordered, _available_phys_ids(t))):
+        ids[b.name] = bid
         slots[b.name] = n + k
-        used.add(next_id)
 
     worlds = {b.name: worlds_all[b.name] for b in ordered}
 
@@ -388,6 +393,9 @@ def _scene_preset(sc):
 
 def _rename_bones(arm, rename):
     meshes = [o for o in bpy.data.objects if o.type == 'MESH']
+    migration = arm.get('MT_MmdBoneMap')
+    if migration is not None:
+        meshes = [o for o in meshes if o.find_armature() in (None, arm)]
     n_bones = n_groups = 0
     for old, new in rename.items():
         if old == new:
@@ -424,24 +432,38 @@ def _rename_bones(arm, rename):
             n_groups += 1
         b.name = new
         n_bones += 1
+    if migration is not None:
+        arm['MT_MmdBoneMap'] = {src: rename.get(dest, dest) for src, dest in migration.items()}
     return n_bones, n_groups
 
 _PHYS_NAME_RE = re.compile(r'^b_(\d+)(?:\.[lr])?$')
 
 def arm_physics_names(arm):
+    named_ids = arm.get('MT_PhysIdMap') or {}
+    registered = {str(name) for bid, name in named_ids.items()
+                  if str(bid).isdigit() and int(bid) >= PHYS_MIN}
     out = []
     for b in arm.data.bones:
         m = _PHYS_NAME_RE.match(b.name)
-        if m and int(m.group(1)) >= PHYS_MIN:
+        if b.name in registered or (m and int(m.group(1)) >= PHYS_MIN):
             out.append(b.name)
     return out
+
+def _physics_record(name, name_map):
+    record = name_map.get(name)
+    if record is not None:
+        return record
+    match = _PHYS_NAME_RE.match(name)
+    return int(match.group(1)) - 1 if match else -1
 
 def template_needs_rebuild(mod_bytes, arm):
     t = _parse(mod_bytes)
     n = t['n']
+    from .MTframework_MHGU import get_armature_bone_name_map
+    recorded = get_armature_bone_name_map(arm)
     for nm in arm_physics_names(arm):
-        rec = int(_PHYS_NAME_RE.match(nm).group(1)) - 1
-        if rec >= n or t['bones'][rec]['id'] < PHYS_MIN:
+        rec = _physics_record(nm, recorded)
+        if not 0 <= rec < n or t['bones'][rec]['id'] < PHYS_MIN:
             return True
     return False
 
@@ -464,23 +486,28 @@ def ensure_template(sc, arm, mod_bytes, off, preset):
     return mod_bytes
 
 def rebuild_template_from_armature(mod_bytes, arm_obj, offset, preset_key=DEFAULT_PRESET_KEY):
+    from .MTframework_MHGU import get_armature_bone_name_map
+
     base = keep_body_bones(mod_bytes)
+    recorded = get_armature_bone_name_map(arm_obj)
     names = sorted(arm_physics_names(arm_obj),
-                   key=lambda nm: int(_PHYS_NAME_RE.match(nm).group(1)))
+                   key=lambda nm: _physics_record(nm, recorded))
     new_mod, _ignored, info = plan_custom_bones(base, arm_obj, offset, preset_key,
                                                 ctc_bytes=b'', order=names)
     return new_mod, info
 
 def rebuild_template_only(mod_bytes, arm, offset, preset_key):
+    from .MTframework_MHGU import get_armature_bone_name_map
+
     base = keep_body_bones(mod_bytes)
+    recorded = get_armature_bone_name_map(arm)
     names = sorted(arm_physics_names(arm),
-                   key=lambda nm: int(_PHYS_NAME_RE.match(nm).group(1)))
+                   key=lambda nm: _physics_record(nm, recorded))
     new_mod, _ignored, info = plan_custom_bones(base, arm, offset, preset_key,
                                                 ctc_bytes=b'', order=names)
     bad = []
     for nm, slot in info['slots'].items():
-        m = _PHYS_NAME_RE.match(nm)
-        if m and slot != int(m.group(1)) - 1:
+        if slot != _physics_record(nm, recorded):
             bad.append('%s→槽%d' % (nm, slot))
     if bad:
         raise ValueError('骨架顺序和骨名对不上，不能自动重建模板：%s' % ', '.join(bad[:5]))
@@ -682,6 +709,8 @@ def build_ctc_from_bones(mod_bytes, arm_obj, offset, preset_key=DEFAULT_PRESET_K
         slot = mod_bytes[t['lut'] + bid] if bid < 256 else 0xFF
         return ('b_%d' % (slot + 1)) if slot != 0xFF else ('b_%d' % bid)
     old = {}
+    connectors = set()
+    follow_rotation = set()
     old_groups = []
     if ctc_bytes:
         try:
@@ -696,6 +725,10 @@ def build_ctc_from_bones(mod_bytes, arm_obj, offset, preset_key=DEFAULT_PRESET_K
                 _r = struct.unpack_from('<12f', ctc_bytes, _o + 16)
                 _vals = struct.unpack_from('<3f', ctc_bytes, _o + 80)
                 old[_jid] = ((_r[4], _r[5], _r[6]), _vals)
+                if ctc_bytes[_o + 2] & 1 and ctc_bytes[_o + 3] == 1:
+                    follow_rotation.add(_jid)
+                if _vals[0] == 0.0 and struct.unpack_from('<f', ctc_bytes, _o + 8)[0] == 0.0:
+                    connectors.add(_jid)
             _idx = 0
             for _g in range(_ng):
                 _o = 0x3C + 80 * _g
@@ -713,6 +746,8 @@ def build_ctc_from_bones(mod_bytes, arm_obj, offset, preset_key=DEFAULT_PRESET_K
         except Exception:
             old = {}
             old_groups = []
+            connectors.clear()
+            follow_rotation.clear()
     phys = [b for b in t['bones'] if b['id'] >= PHYS_MIN]
     if not phys:
         raise ValueError('模板里没有物理骨（id >= 20）')
@@ -736,10 +771,16 @@ def build_ctc_from_bones(mod_bytes, arm_obj, offset, preset_key=DEFAULT_PRESET_K
     if len(order) != len(phys):
         raise ValueError('物理骨父子关系有环（%d/%d 可达）' % (len(order), len(phys)))
 
+    separate_roots = set(follow_rotation)
+    for bid in order:
+        bone = arm_obj.data.bones.get(_bone_name(bid))
+        if bone and bone.get('MT_PhysBridge'):
+            separate_roots.add(bid)
     chains, chain_of = [], {}
     for bid in order:
         pid = parent.get(bid)
-        if pid is not None and len(kids.get(pid, [])) == 1 and pid in chain_of:
+        if (pid is not None and len(kids.get(pid, [])) == 1
+                and pid in chain_of and bid not in separate_roots):
             chain_of[pid].append(bid)
             chain_of[bid] = chain_of[pid]
         else:
@@ -748,7 +789,8 @@ def build_ctc_from_bones(mod_bytes, arm_obj, offset, preset_key=DEFAULT_PRESET_K
             chain_of[bid] = c
 
     def _child_chain(pid):
-        _cands = [c for c in chains if c and parent.get(c[0]) == pid and c[0] != pid]
+        _cands = [c for c in chains if c and parent.get(c[0]) == pid and c[0] != pid
+                  and c[0] not in separate_roots]
 
         for c in _cands:
             if len(c) == 1:
@@ -812,8 +854,16 @@ def build_ctc_from_bones(mod_bytes, arm_obj, offset, preset_key=DEFAULT_PRESET_K
             _ax, _vals = old.get(bid, (None, None))
             if _vals is None and auto_init:
                 _vals = values[i]
-            nodes.append(_node_bytes(bid, i == 0, d, _gp, identity=ident,
-                                     axis=_ax, values=_vals))
+            bone = arm_obj.data.bones.get(_bone_name(bid))
+            marked_connector = bool(bone and bone.get('MT_PhysBridge'))
+            if marked_connector:
+                _vals = (0.0, *(_vals[1:] if _vals is not None else gp[9:11]))
+            node = _node_bytes(bid, i == 0, d, _gp, identity=ident, axis=_ax, values=_vals)
+            if bid in connectors or marked_connector:
+                node = node[:8] + b'\0' * 4 + node[12:]
+            if i == 0 and (bid in follow_rotation or (marked_connector and parent[bid] is not None)):
+                node = node[:3] + b'\x01' + node[4:]
+            nodes.append(node)
 
     header = bytearray(_CTC_HEAD_TMPL)
     struct.pack_into('<I', header, 0x10, len(groups))
@@ -860,6 +910,7 @@ if bpy is not None:
         bl_label = "登记自定义物理骨"
         bl_description = ("先在编辑模式里自己加骨、摆好位置和父子，再点这里："
                           "写进 .mod 骨骼段 + LUT，并按骨链生成 CTC")
+        bl_options = {'REGISTER', 'UNDO'}
 
         def execute(self, context):
             sc = context.scene
@@ -899,9 +950,37 @@ if bpy is not None:
                 except Exception as e:
                     self.report({'ERROR'}, '模板与骨架不一致，自动重建失败: %s' % e)
                     return {'CANCELLED'}
+            from .MTframework_MHGU_physreduce import apply_fusion, fusion_plan
 
-            tips = _prepare_two_node_chains(arm, mod_bytes, off, preset, old_ctc)
+            fused = 0
             try:
+                tpl_info = _parse(mod_bytes)
+                known = _custom_records(arm, tpl_info['n'])
+                pending = [bone for bone in arm.data.bones if bone.name not in known]
+                if not pending:
+                    self.report({'INFO'}, '当前骨骼都已登记。跨组链可直接使用「添加锁死连接骨」')
+                    return {'FINISHED'}
+                if any(bone.parent is None for bone in pending):
+                    raise ValueError('新物理骨必须有父骨')
+                parents = {bone.name: bone.parent.name for bone in pending}
+                chains = _split_chains(pending, parents)
+                reserve = sum(len(chain) == 1 for chain in chains)
+                fuse = sc.MT_PhysFuseOverflow
+                capacity = _physical_budget(tpl_info, sc.MT_PhysFuseLimit if fuse else 255)
+                required = len(pending) + reserve
+                if required > capacity:
+                    if not fuse:
+                        raise ValueError('登记需要 %d 个骨位（含补链尾），只剩 %d 个。可开启超限对半融并'
+                                         % (required, capacity))
+                    paired = {rec: pair[0] for pair in ((1, 4), (2, 5), (3, 6), (11, 15),
+                                                        (12, 16), (13, 17), (14, 18))
+                              for rec in pair}
+                    anchors = {rec: name for name, rec in known.items()}
+                    families = {name: anchors.get(paired[rec], name) for name, rec in known.items()
+                                if rec in paired}
+                    removed, endpoints = fusion_plan(parents, reserve, capacity, families)
+                    fused = apply_fusion(context, arm, removed, endpoints)
+                tips = _prepare_two_node_chains(arm, mod_bytes, off, preset, old_ctc)
                 new_mod, new_ctc, info = plan_custom_bones(
                     mod_bytes, arm, off, preset, ctc_bytes=old_ctc)
             except Exception as e:
@@ -914,7 +993,7 @@ if bpy is not None:
             sc['MT_LastImportPath'] = tmp
             try:
                 from .MTframework_MHGU_tpl import store as _tpl_store
-                _tpl_store(sc, tmp)
+                _tpl_store(context, tmp)
             except Exception:
                 pass
             try:
@@ -925,7 +1004,7 @@ if bpy is not None:
 
             remember_arc(context, _arc, new_ctc)
             context.scene['MT_CtcCustom'] = True
-            _n_bones, _n_groups = _rename_bones(arm, info['rename'])
+            _rename_bones(arm, info['rename'])
 
             _mp0 = dict(arm.get('MT_PhysIdMap') or {})
             _mp0.update({str(k): v for k, v in info['names'].items()})
@@ -941,22 +1020,13 @@ if bpy is not None:
             for b in arm.data.bones:
                 b.select = b.name in new_names
 
-            ids = sorted(info['ids'].values())
-            warn = ''
-            if ids and max(ids) > 27:
-                warn = '（id %d~%d 超出官方 20~27，游戏侧未实测）' % (min(ids), max(ids))
-            chain_desc = ' / '.join('%d 段' % len(c) for c in info['chains'])
-            tip_note = ('；单骨链补了 %d 根子骨（不绑顶点）' % len(tip_final)
-                        if tip_final else '')
+            tip_note = ('，补 %d 个链尾' % len(tip_final)) if tip_final else ''
             if rebuilt:
-                tip_note += '；模板已按骨架自动重建'
-            self.report({'INFO'},
-                        '已登记 %d 根物理骨（%s），id %s%s；骨名与顶点组已改成 %s'
-                        '（改骨 %d 根 / 顶点组 %d 个），权重不用重刷%s'
-                        % (len(ids), chain_desc,
-                           ','.join(str(i) for i in ids), warn,
-                           ','.join(info['names'][i] for i in ids),
-                           _n_bones, _n_groups, tip_note))
+                tip_note += '，已重建模板'
+            if fused:
+                tip_note += '，融并减少 %d 根' % fused
+            self.report({'INFO'}, '已登记 %d 条链、%d 根物理骨%s'
+                        % (len(info['chains']), len(info['ids']), tip_note))
             return {'FINISHED'}
 
     class MT_OT_PhysCtcFix(Operator):
@@ -1201,7 +1271,54 @@ if bpy is not None:
                         % (ng, nc))
             return {'FINISHED'}
 
-    _classes = [MT_OT_PhysCustomRegister,
+    class MT_OT_PhysConnectGroups(Operator):
+        bl_idname = 'mt_framework.phys_connect_groups'
+        bl_label = '添加锁死连接骨'
+        bl_description = '从原物理父骨尾端连接跨组物理子链，并修复旧版连接骨'
+        bl_options = {'REGISTER', 'UNDO'}
+
+        @classmethod
+        def poll(cls, context):
+            return context.mode == 'OBJECT'
+
+        def execute(self, context):
+            from .MTframework_MHGU_phys import MOD_MAGIC, arc_entries, find_entry, recalled_arc
+            from .MTframework_MHGU_physbridge import connect_physics_groups
+            from .MTframework_MHGU_tpl import ensure
+
+            arm = _find_armature(context)
+            arc, ctc = recalled_arc(context)
+            if arm is None or not ctc:
+                self.report({'ERROR'}, '请先在 MT 骨架上登记物理骨')
+                return {'CANCELLED'}
+            sc = context.scene
+            budget = sc.MT_PhysFuseLimit if sc.MT_PhysFuseOverflow else 255
+            try:
+                path = ensure(context)
+                if path and os.path.isfile(path):
+                    with open(path, 'rb') as f:
+                        mod = f.read()
+                elif arc and os.path.isfile(arc):
+                    with open(arc, 'rb') as f:
+                        entry = find_entry(arc_entries(f.read()), MOD_MAGIC)
+                    mod = entry['body'] if entry else b''
+                else:
+                    mod = b''
+                if not mod.startswith(MOD_MAGIC):
+                    raise ValueError('找不到当前工程的 MOD 模板')
+                new, count, direct, removed = connect_physics_groups(context, arm, mod, ctc, budget)
+            except (OSError, ValueError, RuntimeError, struct.error) as exc:
+                self.report({'ERROR'}, str(exc))
+                return {'CANCELLED'}
+            if count or direct or removed or new != ctc:
+                remember_arc(context, arc, new)
+                self.report({'INFO'}, f'已处理 {count} 根锁死连接骨、{direct} 处直接相连，'
+                            f'同步 {removed} 根已删除骨')
+            else:
+                self.report({'INFO'}, '当前物理链已连接，无需改动')
+            return {'FINISHED'}
+
+    _classes = [MT_OT_PhysCustomRegister, MT_OT_PhysConnectGroups,
                 MT_OT_PhysCtcFix, MT_OT_PhysRebuildTemplate,
                 MT_OT_PhysCompleteChains, MT_OT_PhysRebuildCtc]
 

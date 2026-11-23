@@ -639,8 +639,9 @@ if bpy is not None:
         bl_label = "导出 .tex"
         bl_options = {'REGISTER'}
 
-        filepath: StringProperty(subtype='FILE_PATH')
+        filepath: StringProperty(subtype='FILE_PATH', options={'SKIP_SAVE'})
         filter_glob: StringProperty(default="*.tex", options={'HIDDEN'})
+        atlas_settings: BoolProperty(default=False, options={'HIDDEN', 'SKIP_SAVE'})
 
         def _pick_image(self, context):
             scene = context.scene
@@ -680,6 +681,9 @@ if bpy is not None:
             if img is None:
                 self.report({'ERROR'}, "先在面板里选一张图片")
                 return {'CANCELLED'}
+            if self.atlas_settings and not img.get('mt_atlas'):
+                self.report({'ERROR'}, '先生成图集，或选择已生成的 MHGU 图集')
+                return {'CANCELLED'}
 
             if not self.filepath:
                 base = os.path.splitext(os.path.basename(img.name))[0] or 'texture'
@@ -702,8 +706,9 @@ if bpy is not None:
                     except Exception:
                         info = None
 
-                w, h = target_size(src_w, src_h, scene.MT_TexSize)
-                fmt_mode = scene.MT_TexFormat
+                w, h = ((src_w, src_h) if self.atlas_settings else
+                        target_size(src_w, src_h, scene.MT_TexSize))
+                fmt_mode = 'DXT5' if self.atlas_settings else scene.MT_TexFormat
                 if fmt_mode == 'AUTO':
                     fmt_id = info.format_id if info is not None else 0x17
                 else:
@@ -712,7 +717,7 @@ if bpy is not None:
                 if (w, h) != (src_w, src_h):
                     rgba = resize_rgba(rgba, w, h)
 
-                mips = max_mip_count(w, h) if scene.MT_TexMips else 1
+                mips = max_mip_count(w, h) if self.atlas_settings or scene.MT_TexMips else 1
                 blob = encode_tex(rgba, fmt_id, mips)
 
                 with open(path, 'wb') as f:
@@ -727,12 +732,6 @@ if bpy is not None:
                 self.report({'ERROR'}, "导出失败: %s" % e)
                 return {'CANCELLED'}
             return {'FINISHED'}
-
-        def invoke(self, context, event):
-            if self.filepath:
-                return self.execute(context)
-            context.window_manager.fileselect_add(self)
-            return {'RUNNING_MODAL'}
 
     _classes = [MT_OT_ImportTex, MT_OT_ExportTex]
 

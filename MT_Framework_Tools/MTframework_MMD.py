@@ -309,6 +309,8 @@ class MTFrameworkMMDProps(PropertyGroup):
         poll=lambda self, obj: obj.type == 'ARMATURE',
     )
 
+    pelvis_bone: StringProperty(name='盆骨', description='留空时自动识别 MMD 的下半身、Pelvis 或 Hips')
+
 def _is_mhgu_bone_name(name):
     if not name or not name.startswith("b_"):
         return False
@@ -846,6 +848,157 @@ class MT_OT_CenterModel(Operator):
         self.report({'INFO'}, "已平移 (%.4f, %.4f, %.4f)" % (off.x, off.y, off.z))
         return {'FINISHED'}
 
+class MT_OT_MMDAlignBody(Operator):
+    bl_idname = 'mt_framework.mmd_align_body'
+    bl_label = '自动对齐身体骨骼'
+    bl_description = '以原来的 b_1 对齐 MMD 盆骨，接齐躯干和四肢主链，双手以腕关节为锚点'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT'
+
+    def execute(self, context):
+        from .MTframework_MMD_body import align_body, body_armatures
+        props = context.scene.MT_Framework_MMD_Props
+        try:
+            mt, mmd = body_armatures(context)
+            scale, count, pelvis, z = align_body(context, mt, mmd, props.pelvis_bone, props.swap_lr)
+        except (ValueError, RuntimeError) as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        self.report({'INFO'}, '对齐 %d 根身体骨，MMD 缩放 %.4g×，%s 与 b_1 同高 %.5f'
+                    % (count, scale, pelvis, z))
+        return {'FINISHED'}
+
+class MT_OT_MMDRestoreRoot(Operator):
+    bl_idname = 'mt_framework.mmd_restore_root'
+    bl_label = '从源文件恢复 b_1'
+    bl_description = '选择原身体 ARC 或 MOD，恢复 b_1 的尾端、长度和方向'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    filepath: StringProperty(subtype='FILE_PATH')
+    filter_glob: StringProperty(default='*.arc;*.mod;*.new', options={'HIDDEN'})
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT'
+
+    def invoke(self, context, event):
+        self.filepath = self.filepath or context.scene.get('MT_ArcPath', '')
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def execute(self, context):
+        from .MTframework_MMD_body import restore_root_tail
+        from .MTframework_MHGU_phys import _phys_armature
+
+        arm = context.scene.MT_Framework_MMD_Props.mhgu_armature or _phys_armature(context)
+        if not self.filepath or arm is None:
+            self.report({'ERROR'}, '请选择 MT 骨架和原身体 ARC 或 MOD')
+            return {'CANCELLED'}
+        try:
+            restore_root_tail(context, arm, self.filepath)
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        self.report({'INFO'}, '已恢复 b_1 的尾端与朝向')
+        return {'FINISHED'}
+
+class MT_OT_MMDBindBody(Operator):
+    bl_idname = 'mt_framework.mmd_bind_body'
+    bl_label = '绑定选中网格到 MT'
+    bl_description = '转移身体和已迁移子骨的权重；手指归到对应手骨'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and any(o.type == 'MESH' for o in context.selected_objects)
+
+    def execute(self, context):
+        from .MTframework_MMD_body import bind_body, body_armatures
+        props = context.scene.MT_Framework_MMD_Props
+        meshes = [o for o in context.selected_objects if o.type == 'MESH']
+        try:
+            mt, mmd = body_armatures(context)
+            fallback = bind_body(context, mt, mmd, meshes, props.pelvis_bone, props.swap_lr)
+        except (ValueError, RuntimeError) as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        self.report({'WARNING'} if fallback else {'INFO'}, '已绑定 %d 个网格%s' %
+                    (len(meshes), '，%d 个无身体权重顶点已绑到 b_1' % fallback if fallback else ''))
+        return {'FINISHED'}
+
+class MT_OT_MMDApplyTPose(Operator):
+    bl_idname = 'mt_framework.mmd_apply_t_pose'
+    bl_label = '应用 MMD T 姿势'
+    bl_description = '将双侧肩、上臂和前臂转至与 X 轴平行，写入编辑骨架、网格和形态键'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT'
+
+    def execute(self, context):
+        from .MTframework_MMD_body import mmd_armature
+        from .MTframework_MMD_rig import apply_t_pose
+        try:
+            verts = apply_t_pose(context, mmd_armature(context))
+        except (ValueError, RuntimeError) as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        self.report({'INFO'}, '已应用 MMD T 姿势，更新 %d 个顶点' % verts)
+        return {'FINISHED'}
+
+class MT_OT_MMDGrip(Operator):
+    bl_idname = 'mt_framework.mmd_bake_grip'
+    bl_label = '烘焙手指握持姿势'
+    bl_description = '只需 MMD。绕手腕抬手掌并弯曲手指，烘焙到编辑骨架、网格和形态键。F9 可调角度'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    strength: FloatProperty(name='握持力度', default=1.0, min=0.05, max=1.3)
+    wrist_lift: FloatProperty(name='手腕上抬（°）', default=20.0, min=0.0, max=35.0)
+    thumb_lower: FloatProperty(name='拇指下压（°）', default=12.0, min=0.0, max=30.0)
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT'
+
+    def execute(self, context):
+        from .MTframework_MMD_body import mmd_armature
+        from .MTframework_MMD_rig import bake_grip
+        try:
+            verts = bake_grip(context, mmd_armature(context), self.strength,
+                              self.wrist_lift, self.thumb_lower)
+        except (ValueError, RuntimeError) as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        self.report({'INFO'}, '已烘焙握持：%d 个顶点' % verts)
+        return {'FINISHED'}
+
+class MT_OT_MMDMigrateBones(Operator):
+    bl_idname = 'mt_framework.mmd_migrate_bones'
+    bl_label = '迁移带权重的子骨'
+    bl_description = '把选中网格使用的非身体子骨和父子链复制到 MT，可再登记为物理骨'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT'
+
+    def execute(self, context):
+        from .MTframework_MMD_body import body_armatures
+        from .MTframework_MMD_rig import migrate_bones
+        props = context.scene.MT_Framework_MMD_Props
+        try:
+            mt, mmd = body_armatures(context)
+            count = migrate_bones(context, mt, mmd, props.pelvis_bone, props.swap_lr)
+        except (ValueError, RuntimeError) as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        self.report({'INFO'}, '已迁移 %d 根 MMD 子骨' % count)
+        return {'FINISHED'}
+
 class MT_PT_MMDPanel(Panel):
 
     bl_label = "MMD 转换"
@@ -860,6 +1013,21 @@ class MT_PT_MMDPanel(Panel):
         layout = self.layout
         props = context.scene.MT_Framework_MMD_Props
         obj = context.active_object
+
+        fit = layout.box()
+        fit.prop(props, 'mmd_armature', text='MMD 骨架（自动）' if not props.mmd_armature else 'MMD 骨架')
+        fit.operator('mt_framework.mmd_apply_t_pose', icon='ARMATURE_DATA')
+        fit.operator('mt_framework.mmd_bake_grip', icon='HAND')
+
+        fit = layout.box()
+        fit.prop(props, 'mhgu_armature', text='MT 骨架（自动）' if not props.mhgu_armature else 'MT 骨架')
+        if props.mmd_armature:
+            fit.prop_search(props, 'pelvis_bone', props.mmd_armature.data, 'bones', text='盆骨')
+        fit.prop(props, 'swap_lr')
+        fit.operator('mt_framework.mmd_align_body', icon='ARMATURE_DATA')
+        fit.operator('mt_framework.mmd_restore_root', icon='FILE_REFRESH')
+        fit.operator('mt_framework.mmd_migrate_bones', icon='BONE_DATA')
+        fit.operator('mt_framework.mmd_bind_body', icon='MOD_ARMATURE')
 
         box = layout.box()
         row = box.row()
@@ -906,6 +1074,12 @@ classes = [
     MTFrameworkMMDProps,
     MT_OT_MMDRenameVGroups,
     MT_OT_CenterModel,
+    MT_OT_MMDAlignBody,
+    MT_OT_MMDRestoreRoot,
+    MT_OT_MMDApplyTPose,
+    MT_OT_MMDGrip,
+    MT_OT_MMDMigrateBones,
+    MT_OT_MMDBindBody,
     MT_PT_MMDPanel,
 ]
 

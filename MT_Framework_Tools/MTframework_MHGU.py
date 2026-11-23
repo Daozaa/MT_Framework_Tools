@@ -357,6 +357,34 @@ def convert_bone_position(trans):
     x, y, z = trans[0], trans[1], trans[2]
     return Vector((-x, z, -y))
 
+def infer_bone_tails(heads, parents):
+    children = [[] for _ in heads]
+    for i, parent in enumerate(parents):
+        if 0 <= parent < min(len(heads), 254) and parent != i:
+            children[parent].append(i)
+    size = max((max(h[axis] for h in heads) - min(h[axis] for h in heads)
+                for axis in range(3)), default=1.0) if heads else 1.0
+    default_len = (size or 1.0) * 0.06
+    tails = []
+    for i, head in enumerate(heads):
+        branches = [heads[j] - head for j in children[i]]
+        if len(branches) == 1 and branches[0].length > 1e-6:
+            tails.append(heads[children[i][0]])
+            continue
+        direction = sum((d.normalized() for d in branches if d.length > 1e-6), Vector())
+        if direction.length > 1e-6:
+            length = sum(d.length for d in branches) / len(branches)
+            tails.append(head + direction.normalized() * max(length * 0.6, default_len))
+            continue
+        parent = parents[i]
+        if 0 <= parent < min(len(heads), 254) and parent != i:
+            d = head - heads[parent]
+            if d.length > 1e-6:
+                tails.append(head + d.normalized() * max(d.length * 0.5, default_len))
+                continue
+        tails.append(head + Vector((0.0, 0.0, default_len)))
+    return tails
+
 def build_armature(name, bone_infos, world_matrices, bone_lut=None, dequant=None,
                    bbox_min=None, bbox_max=None, mesh_min=None, mesh_max=None):
     arm_data = bpy.data.armatures.new(name)
@@ -401,41 +429,8 @@ def build_armature(name, bone_infos, world_matrices, bone_lut=None, dequant=None
         if 0 <= p < count and p != i:
             edit_bones[i].parent = edit_bones[p]
 
-    size = 1.0
-    if heads:
-        size = max(
-            max(h.x for h in heads) - min(h.x for h in heads),
-            max(h.y for h in heads) - min(h.y for h in heads),
-            max(h.z for h in heads) - min(h.z for h in heads),
-        ) or 1.0
-    default_len = size * 0.06
-
-    for i in range(count):
-        children = [j for j in range(count) if parents[j] == i]
-        h = heads[i]
-        if len(children) == 1:
-            tail = heads[children[0]]
-            if (tail - h).length > 1e-6:
-                edit_bones[i].tail = tail
-                continue
-        if children:
-            acc = Vector((0.0, 0.0, 0.0))
-            for j in children:
-                d = heads[j] - h
-                if d.length > 1e-6:
-                    acc += d.normalized()
-            if acc.length > 1e-6:
-                L = sum((heads[j] - h).length for j in children) / len(children)
-                edit_bones[i].tail = h + acc.normalized() * max(L * 0.6, default_len)
-                continue
-
-        p = parents[i]
-        if 0 <= p < count:
-            d = h - heads[p]
-            if d.length > 1e-6:
-                edit_bones[i].tail = h + d.normalized() * max(d.length * 0.5, default_len)
-                continue
-        edit_bones[i].tail = h + Vector((0.0, 0.0, default_len))
+    for bone, tail in zip(edit_bones, infer_bone_tails(heads, parents)):
+        bone.tail = tail
 
     bpy.ops.object.mode_set(mode='OBJECT')
 
@@ -540,12 +535,14 @@ def vertex_normals_file_space(mesh_obj):
 
     return [Vector((v.x, v.z, -v.y)) for v in out]
 
-def vertex_tangents_file_space(obj, uv_index=0):
+def vertex_tangents_file_space(obj, uv_index=None):
     from mathutils import Vector
     me = obj.data
     if not me.uv_layers or len(me.vertices) == 0:
         return []
-    uvl = me.uv_layers[min(uv_index, len(me.uv_layers) - 1)].data
+    layer = (me.uv_layers.active if uv_index is None else
+             me.uv_layers[min(uv_index, len(me.uv_layers) - 1)])
+    uvl = layer.data
 
     n_v = len(me.vertices)
     tan = [Vector((0.0, 0.0, 0.0)) for _ in range(n_v)]
@@ -928,6 +925,11 @@ def register():
     MTframework_MHGU_ui.register()
     from . import MTframework_MMD
     MTframework_MMD.register()
+    try:
+        from .MTframework_MHGU_atlas import MT_OT_MakeAtlas
+        bpy.utils.register_class(MT_OT_MakeAtlas)
+    except Exception as exc:
+        print('NOTE: 图集工具未启用 (%s)' % exc)
 
     try:
         from . import MTframework_MHGU_matcheck
@@ -1013,6 +1015,11 @@ def unregister():
         pass
     from . import MTframework_MMD
     MTframework_MMD.unregister()
+    try:
+        from .MTframework_MHGU_atlas import MT_OT_MakeAtlas
+        bpy.utils.unregister_class(MT_OT_MakeAtlas)
+    except (ImportError, RuntimeError):
+        pass
     from . import MTframework_MHGU_ui
     MTframework_MHGU_ui.unregister()
 

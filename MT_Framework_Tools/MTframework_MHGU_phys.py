@@ -78,7 +78,7 @@ def import_arc_file(path):
 
 LAST_CTC_FILTER = None
 
-def export_arc(context, arc_path, mod_path, mod_bytes, dst=None):
+def export_arc(context, arc_path, mod_path, mod_bytes, dst=None, *, report=None):
     with open(arc_path, 'rb') as f:
         entries = arc_entries(f.read())
     mod = find_entry(entries, MOD_MAGIC)
@@ -158,65 +158,6 @@ def export_arc(context, arc_path, mod_path, mod_bytes, dst=None):
         except Exception:
             pass
 
-    try:
-        from . import MTframework_MHGU_ccl as _CCL
-        _custom_caps = _CCL.capsules_from_json(
-            getattr(context.scene, 'MT_CclCapsules', '') or '')
-    except Exception:
-        _CCL = None
-        _custom_caps = []
-    _ccl_on = bool(getattr(context.scene, 'MT_CclEnable', False))
-    if _custom_caps:
-        _ccl_on = True
-    _caps_written = []
-    if _ccl_on and _CCL is not None:
-        try:
-            _low = (arc_path or '').replace('/', '\\').lower()
-            _nm_low = (mod.get('name') or '').lower()
-            _helm_like = ('\\helm' in _low or '\\hair' in _low
-                          or 'helm' in _nm_low or 'hair' in _nm_low)
-
-            if _helm_like:
-                _caps = _custom_caps or _CCL.body_capsules(mod_bytes)
-                if _caps:
-
-                    try:
-                        from .MTframework_MHGU_verify import capsule_warnings
-                        _warns, _sum = capsule_warnings(_caps)
-                        print('[MT] 胶囊体检：%s' % _sum)
-                        for _w in _warns:
-                            print('[MT] 警告：%s' % _w)
-                    except Exception:
-                        pass
-                    _CCL.apply_to_entries(entries, mod['name'], _CCL.build_ccl(_caps))
-                    _caps_written = list(_caps)
-                    print('[MT] 已写入 CCL：%d 个胶囊（%s，%s）'
-                          % (len(_caps),
-                             '自定义' if _custom_caps else '自动',
-                             mod.get('name')))
-                else:
-                    print('[MT] 警告：CCL 没生成出胶囊（骨表里没有 0~19 号骨？）')
-            elif _custom_caps:
-                print('[MT] 当前 arc 不是 helm/hair：不写 CCL 条目（引擎只读该槽的 CCL）')
-            if ctc_bytes:
-                ctc_bytes, _nf = _CCL.enable_collision_flags(ctc_bytes)
-                if _nf:
-                    print('[MT] CTC 碰撞标志位已打开：%d 组 (+0x04)' % _nf)
-        except Exception as _e_cc:
-            print('[MT] CCL 写入失败:', _e_cc)
-
-    try:
-        _it = int(getattr(context.scene, 'MT_PhysIter', 1) or 1)
-    except Exception:
-        _it = 1
-    if ctc_bytes and _it != 1 and ctc_bytes[:4] == b'CTC\x00' and len(ctc_bytes) >= 0x38:
-        _it = max(1, min(3, _it))
-        _hb = bytearray(ctc_bytes)
-        _hb[52] = _it
-        _hb[53] = _it
-        ctc_bytes = bytes(_hb)
-        print('[MT] CTC 解算迭代设为 %d（header +52/+53）' % _it)
-
     if bool(getattr(context.scene, 'MT_PhysSegment', False)):
         try:
             from .MTframework_MHGU_ctc import set_segment_shapes
@@ -243,6 +184,43 @@ def export_arc(context, arc_path, mod_path, mod_bytes, dst=None):
                     print('[MT] 警告：骨段碰撞没生效（CTC 结构不认识）')
         except Exception as _e_seg:
             print('[MT] 骨段碰撞失败:', _e_seg)
+    from . import MTframework_MHGU_ccl as ccl
+
+    scene = context.scene
+    custom = ccl.capsules_from_json(getattr(scene, 'MT_CclCapsules', '') or '')
+    auto = bool(getattr(scene, 'MT_CclEnable', False))
+    protect = bool(getattr(scene, 'MT_CclProtect', True))
+    written_caps, adjusted, skipped = [], 0, 0
+    expect_ccl = None
+    if custom or auto:
+        path = (arc_path or '').replace('/', '\\').lower()
+        basename = (mod['name'] or '').rsplit('\\', 1)[-1].lower()
+        helm = any('\\' + name in path or name in basename for name in ('helm', 'hair'))
+
+        source_ctc = ctc_bytes or (find_entry(entries, CTC_MAGIC) or {}).get('body', b'')
+        if helm:
+            written_caps, adjusted, skipped = ccl.prepare_export_capsules(
+                mod_bytes, source_ctc, custom, auto, protect)
+            if written_caps:
+                ccl.apply_to_entries(entries, mod['name'], ccl.build_ccl(written_caps))
+                expect_ccl = True
+            elif custom and skipped:
+                ccl.apply_to_entries(entries, mod['name'], None)
+                expect_ccl = False
+        if source_ctc and (not helm or expect_ccl is not False):
+            ctc_bytes, _ = ccl.enable_collision_flags(source_ctc)
+
+    try:
+        _it = int(getattr(context.scene, 'MT_PhysIter', 1) or 1)
+    except Exception:
+        _it = 1
+    if ctc_bytes and _it != 1 and ctc_bytes[:4] == b'CTC\x00' and len(ctc_bytes) >= 0x38:
+        _it = max(1, min(3, _it))
+        _hb = bytearray(ctc_bytes)
+        _hb[52] = _it
+        _hb[53] = _it
+        ctc_bytes = bytes(_hb)
+        print('[MT] CTC 解算迭代设为 %d（header +52/+53）' % _it)
     if ctc_bytes:
         ctc = find_entry(entries, CTC_MAGIC)
         if ctc is not None:
@@ -261,8 +239,11 @@ def export_arc(context, arc_path, mod_path, mod_bytes, dst=None):
     from .MTframework_MHGU_verify import write_arc_verified
     _dst2, _bak = write_arc_verified(
         dst, out,
-        caps=_caps_written or None,
-        want_ccl=True if _caps_written else None)
+        caps=written_caps or None,
+        want_ccl=expect_ccl)
+    if adjusted or skipped:
+        from .MTframework_MHGU_ui import _ccl_after_export
+        _ccl_after_export(context, written_caps, adjusted, skipped, bool(custom), report)
     print('[MT] 已校验并写入 %s%s'
           % (_dst2, ('（备份 %s）' % os.path.basename(_bak)) if _bak else ''))
     return _dst2
@@ -399,7 +380,7 @@ def _ensure_template(operator, context):
     except Exception as e:
         operator.report({'WARNING'}, '模板自动重建失败：%s（导出可能不完整）' % e)
 
-def _export(operator, context, filepath):
+def _export(operator, context, filepath, *, expect_atlas_uv=False):
 
     try:
         if bpy.context.mode != 'OBJECT':
@@ -415,7 +396,8 @@ def _export(operator, context, filepath):
     _ensure_template(operator, context)
     from .MTframework_MHGU_export import export_mod_file
     props = context.scene.MT_Framework_Props
-    out = export_mod_file(filepath, props.game_fix)
+    out = export_mod_file(filepath, props.game_fix, expect_atlas_uv=expect_atlas_uv,
+                          report=operator.report)
     if not out:
         _tpl_now = context.scene.get('MT_LastImportPath', '') or ''
         if _tpl_now and os.path.exists(_tpl_now):
@@ -468,16 +450,11 @@ def _export(operator, context, filepath):
             print('[MT] 自动生成 CTC 失败:', _e0)
 
     try:
-        import re as _re
+        from .MTframework_MHGU_physcustom import arm_physics_names
         _arm = _phys_armature(context)
         _tpl = context.scene.get('MT_LastImportPath', '') or ''
         if _arm is not None and _tpl and os.path.exists(_tpl):
-
-            _arm_phys = []
-            for _b in _arm.data.bones:
-                _m = _re.match(r'^b_(\d+)(?:\.[lr])?$', _b.name)
-                if _m and int(_m.group(1)) >= 20:
-                    _arm_phys.append(_b.name)
+            _arm_phys = arm_physics_names(_arm)
             with open(out, 'rb') as _f:
                 _mb0 = _f.read()
             _n0 = struct.unpack_from('<H', _mb0, 6)[0]
@@ -503,7 +480,8 @@ def _export(operator, context, filepath):
                     _tpl1 = context.scene.get('MT_LastImportPath', '') or ''
                     if _tpl1 and _tpl1 != _tpl0 and os.path.exists(_tpl1):
                         try:
-                            _fixed = export_mod_file(filepath, props.game_fix)
+                            _fixed = export_mod_file(filepath, props.game_fix,
+                                                     expect_atlas_uv=expect_atlas_uv)
                         except Exception as _e4:
                             print('[MT] 重建模板后重导失败:', _e4)
                     if _fixed:
@@ -676,7 +654,7 @@ def _export(operator, context, filepath):
                 dst = filepath
             else:
                 dst = os.path.splitext(filepath)[0] + '.arc'
-            new_arc = export_arc(context, arc_path, out, mod_bytes, dst)
+            new_arc = export_arc(context, arc_path, out, mod_bytes, dst, report=operator.report)
             _tail_target = new_arc
             if want_arc:
 
@@ -688,6 +666,9 @@ def _export(operator, context, filepath):
             else:
                 operator.report({'INFO'}, '已导出 .mod: %s ；arc: %s' % (out, new_arc))
         except Exception as e:
+            if want_arc:
+                operator.report({'ERROR'}, 'ARC 导出失败：%s（已保留中间模型 %s）' % (e, out))
+                return None
             operator.report({'WARNING'}, '.mod 已导出(%s)，但重建 arc 失败: %s' % (out, e))
     elif want_arc:
         operator.report({'ERROR'},

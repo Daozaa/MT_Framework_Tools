@@ -62,10 +62,19 @@ def read_params(ctc):
 
 def write_params(ctc, gravity=None, damping=None, spring=None, wind=None,
                  trans_force=None, limit_force=None, reflect=None, friction=None,
-                 angle_limit=None, mass=None, elastic=None):
+                 angle_limit=None, mass=None, elastic=None, *, skip_locked=False):
     p = parse_ctc(ctc)
     b = bytearray(ctc)
-    for i in range(p['ng']):
+    excluded = set()
+    if skip_locked:
+        excluded = {k for k in range(p['nc'])
+                    if struct.unpack_from('<f', ctc, p['n_off'] + k * CHAIN_SZ + 80)[0] == 0.0}
+        _, group_nodes = node_group_map(ctc)
+        active_groups = [i for i, nodes in group_nodes.items()
+                         if any(k not in excluded for k in nodes)]
+    else:
+        active_groups = range(p['ng'])
+    for i in active_groups:
         o = p['g_off'] + i * GROUP_SZ
         if gravity is not None:
             struct.pack_into('<3f', b, o + 32, 0.0, float(gravity), 0.0)
@@ -74,6 +83,8 @@ def write_params(ctc, gravity=None, damping=None, spring=None, wind=None,
             if val is not None:
                 struct.pack_into('<f', b, o + off, float(val))
     for k in range(p['nc']):
+        if k in excluded:
+            continue
         o = p['n_off'] + k * CHAIN_SZ
         if angle_limit is not None:
             struct.pack_into('<f', b, o + 80, float(angle_limit))
@@ -184,7 +195,7 @@ def auto_chain_values(names, positions):
           limit, reflect, angle, mass, elastic)
     return gp, values
 
-def apply_preset(ctc, key):
+def apply_preset(ctc, key, *, skip_locked=False):
     if key == AUTO_PRESET_KEY:
         raise ValueError('“自动”只用于新建/重建物理链；已有 CTC 请选具体预设')
     key = normalize_preset_key(key)
@@ -194,7 +205,7 @@ def apply_preset(ctc, key):
     _name, grav, damp, spring, wind, trans, limit, reflect, angle, mass, elastic = row
     return write_params(ctc, gravity=grav, damping=damp, spring=spring, wind=wind,
                         trans_force=trans, limit_force=limit, reflect=reflect,
-                        angle_limit=angle, mass=mass, elastic=elastic)
+                        angle_limit=angle, mass=mass, elastic=elastic, skip_locked=skip_locked)
 
 def node_group_map(ctc):
     p = parse_ctc(ctc)
@@ -300,10 +311,14 @@ if bpy is not None:
             name="新链自动初值",
             default=False,
             description="登记或重建物理链时按骨名部位和链长生成初值；已有 CTC 不受影响")
+        S.MT_PhysSkipLockedPreset = BoolProperty(
+            name="排除锁死节点", default=True,
+            description="套用全部预设时保留角度上限为 0 的节点；整组锁死时也保留组参数")
     def _unregister_props():
         for k in ('MT_PhysGravity', 'MT_PhysDamping', 'MT_PhysSpring', 'MT_PhysWind',
                   'MT_PhysTrans', 'MT_PhysLimit', 'MT_PhysReflect', 'MT_PhysAngle',
-                  'MT_PhysMass', 'MT_PhysElastic', 'MT_PhysPreset', 'MT_PhysAutoInit'):
+                  'MT_PhysMass', 'MT_PhysElastic', 'MT_PhysPreset', 'MT_PhysAutoInit',
+                  'MT_PhysSkipLockedPreset'):
             try:
                 delattr(bpy.types.Scene, k)
             except Exception:
@@ -457,6 +472,7 @@ if bpy is not None:
         bl_idname = "mt_framework.phys_preset_apply"
         bl_label = "套用物理预设"
         bl_description = "把当前 CTC 的所有组/链改成选中的预设参数"
+        bl_options = {'REGISTER', 'UNDO'}
 
         def execute(self, context):
             arc_path, ctc = recalled_arc(context)
@@ -465,7 +481,7 @@ if bpy is not None:
                 return {'CANCELLED'}
             key = normalize_preset_key(context.scene.MT_PhysPreset)
             try:
-                new = apply_preset(ctc, key)
+                new = apply_preset(ctc, key, skip_locked=context.scene.MT_PhysSkipLockedPreset)
             except Exception as e:
                 self.report({'ERROR'}, str(e))
                 return {'CANCELLED'}

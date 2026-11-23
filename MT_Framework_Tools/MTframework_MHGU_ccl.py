@@ -151,23 +151,25 @@ def _bone_worlds(mod_bytes):
     S = float(sec['scale']) or 1.0
     out = []
     for i in range(n):
-        m = np.array(struct.unpack_from('<16f', mod_bytes, world_off + i * 64),
-                     dtype=np.float64).reshape(4, 4).T
-        m = m.copy()
-        m[:3, :3] /= S
-        out.append((sec['infos'][i]['ID'], m))
+        inverse_bind = np.array(struct.unpack_from('<16f', mod_bytes, world_off + i * 64),
+                                dtype=np.float64).reshape(4, 4).T
+        inverse_bind[:3, :3] /= S
+        rest = np.linalg.inv(inverse_bind)
+        out.append((sec['infos'][i]['ID'], rest))
     return out, S
 
-def body_capsules(mod_bytes, height=None):
+def body_capsules(mod_bytes, height=None, positions=None):
     import numpy as np
-    worlds, scale = _bone_worlds(mod_bytes)
+    worlds, _ = _bone_worlds(mod_bytes)
     pos = {bid: m[:3, 3] for bid, m in worlds}
+    if positions:
+        pos.update({bid: np.asarray(point, dtype=float) for bid, point in positions.items()})
     mats = {bid: m for bid, m in worlds}
     if not pos:
         return []
 
     if height is None:
-        ys = [p[1] for p in pos.values()]
+        ys = [point[1] for bid, point in pos.items() if bid < 20]
         height = (max(ys) - min(ys)) if ys else DEFAULT_HEIGHT
     s = float(height) / DEFAULT_HEIGHT
 
@@ -196,10 +198,179 @@ def body_capsules(mod_bytes, height=None):
     for a, b, pa, pb, r in raw:
         if a not in mats or b not in mats:
             continue
-        la = np.linalg.inv(mats[a]) @ np.r_[pa, 1.0]
-        lb = np.linalg.inv(mats[b]) @ np.r_[pb, 1.0]
+        la = np.linalg.solve(mats[a][:3, :3], pa - pos[a])
+        lb = np.linalg.solve(mats[b][:3, :3], pb - pos[b])
         caps.append({'a': int(a), 'b': int(b),
                      'start': tuple(float(v) for v in la[:3]),
                      'end': tuple(float(v) for v in lb[:3]),
                      'radius': float(r)})
     return caps
+
+def _segment_distances(p, q, starts, ends):
+    import numpy as np
+
+    def dot_rows(a, b):
+        return np.sum(a * b, axis=-1)
+
+    def point_to_segment(points, origins, spans, lengths):
+        with np.errstate(divide='ignore', invalid='ignore'):
+            factors = np.where(lengths > 0, dot_rows(points - origins, spans) / lengths, 0.0)
+        delta = points - origins - spans * np.clip(factors, 0.0, 1.0)[..., None]
+        return np.linalg.norm(delta, axis=-1)
+
+    u, v, w = q - p, ends - starts, p - starts
+    uu, uv, vv = np.dot(u, u), dot_rows(u, v), dot_rows(v, v)
+    uw, vw = dot_rows(u, w), dot_rows(v, w)
+    best = np.minimum.reduce([
+        point_to_segment(p, starts, v, vv), point_to_segment(q, starts, v, vv),
+        point_to_segment(starts, p, u, uu), point_to_segment(ends, p, u, uu),
+    ])
+    det = uu * vv - uv * uv
+    valid = det > 1e-10
+    s = np.divide(uv * vw - vv * uw, det, where=valid, out=np.zeros_like(det))
+    t = np.divide(uu * vw - uv * uw, det, where=valid, out=np.zeros_like(det))
+    valid &= (s > 0) & (s < 1) & (t > 0) & (t < 1)
+    interior = np.linalg.norm(w + s[:, None] * u - t[:, None] * v, axis=-1)
+    return np.where(valid, np.minimum(best, interior), best)
+
+class _CclClearance:
+    def __init__(self, mod_bytes, ctc_bytes, margin, positions):
+        import numpy as np
+
+        if not ctc_bytes or ctc_bytes[:4] != b'CTC\0' or len(ctc_bytes) < 60:
+            raise ValueError('请先登记物理骨，生成 CTC 后再检查胶囊')
+        groups, count = struct.unpack_from('<II', ctc_bytes, 16)
+        start = 60 + 80 * groups
+        if not groups or not count or start + 96 * count > len(ctc_bytes):
+            raise ValueError('CTC 链和节点数据不完整')
+        worlds, _ = _bone_worlds(mod_bytes)
+        self.mats = dict(worlds)
+        self.centers = {bid: mat[:3, 3] for bid, mat in worlds}
+        if positions:
+            self.centers.update({bid: np.asarray(point, dtype=float) for bid, point in positions.items()})
+        cursor = 0
+        starts, ends, radii, ids = [], [], [], []
+        for group in range(groups):
+            length = struct.unpack_from('<I', ctc_bytes, 60 + 80 * group)[0]
+            if cursor + length > count:
+                raise ValueError('CTC 分组节点数超出声明总数')
+            chain = []
+            for index in range(cursor, cursor + length):
+                offset = start + 96 * index
+                bid = struct.unpack_from('<H', ctc_bytes, offset)[0]
+                if bid not in self.centers:
+                    raise ValueError('CTC 节点骨 %d 不在 MOD 内' % bid)
+                radius = struct.unpack_from('<f', ctc_bytes, offset + 8)[0]
+                if not np.isfinite(radius) or radius < 0:
+                    raise ValueError('CTC 节点 %d 的半径无效' % bid)
+                chain.append((self.centers[bid], radius, ctc_bytes[offset + 6], bid))
+            for i, (point, radius, shape, bid) in enumerate(chain):
+
+                if radius == 0.0 or shape not in (1, 2) or (shape == 2 and i + 1 == len(chain)):
+                    continue
+                starts.append(point)
+                ends.append(chain[i + 1][0] if shape == 2 else point)
+                radii.append(radius)
+                ids.append(bid)
+            cursor += length
+        if cursor != count:
+            raise ValueError('CTC 分组和节点总数不一致')
+        self.starts = np.asarray(starts).reshape(-1, 3)
+        self.ends = np.asarray(ends).reshape(-1, 3)
+        self.radii = np.asarray(radii)
+        self.ids = ids
+        self.margin = margin
+
+    def endpoint(self, bid, offset):
+        if bid not in self.mats:
+            raise ValueError('胶囊骨 %d 不在 MOD 内' % bid)
+        return self.centers[bid] + self.mats[bid][:3, :3] @ offset
+
+    def p_q(self, cap):
+        return self.endpoint(cap['a'], cap['start']), self.endpoint(cap['b'], cap['end'])
+
+    def radius(self, p, q):
+        return float(self.gaps(p, q).min(initial=float('inf'))) - self.margin
+
+    def gaps(self, p, q):
+        return _segment_distances(p, q, self.starts, self.ends) - self.radii
+
+    def offset_for(self, bid, world_position):
+        import numpy as np
+        delta = world_position - self.centers[bid]
+        return tuple(float(v) for v in np.linalg.solve(self.mats[bid][:3, :3], delta))
+
+def capsule_clearances(mod_bytes, ctc_bytes, capsules, margin=0.75, positions=None):
+    geometry = _CclClearance(mod_bytes, ctc_bytes, margin, positions)
+    return [geometry.radius(*geometry.p_q(cap)) for cap in capsules]
+
+def _best_capsule_center(geometry, a, b, nominal):
+    import itertools
+    import numpy as np
+
+    radius = min(nominal, geometry.radius(a, b))
+    if radius >= nominal:
+        return a, b, radius
+    best = (a, b, radius)
+    root = geometry.centers.get(0)
+    centered = root is not None and max(abs(a[0] - root[0]), abs(b[0] - root[0])) < 1e-3
+    directions = np.array([v for v in itertools.product((-1, 0, 1), repeat=3)
+                           if v != (0, 0, 0) and (not centered or v[0] == 0)], dtype=float)
+    directions /= np.linalg.norm(directions, axis=1)[:, None]
+    shifts = [np.zeros(3)] + [nominal * step * d
+                              for step in (0.1, 0.2, 0.3, 0.4, 0.5, 0.6) for d in directions]
+    span = b - a
+    trims = ((0.0, 0.0), (0.2, 0.0), (0.0, 0.2), (0.2, 0.2),
+             (0.4, 0.0), (0.0, 0.4), (0.4, 0.4))
+    for trim_start, trim_end in trims:
+        first = a + span * trim_start
+        last = b - span * trim_end
+        for offset in shifts:
+            start, end = first + offset, last + offset
+            radius = min(nominal, geometry.radius(start, end))
+
+            if radius >= np.linalg.norm(offset) and radius > best[2] + 1e-5:
+                best = (start, end, radius)
+                if radius >= nominal:
+                    return best
+    return best
+
+def fit_capsule_clearance(mod_bytes, ctc_bytes, capsules, margin=0.75,
+                          positions=None, *, recenter=False, minimum_fraction=0.5):
+    geometry = _CclClearance(mod_bytes, ctc_bytes, margin, positions)
+    safe = []
+    adjusted = skipped = 0
+    for cap in capsules:
+        if not cap.get('enabled', True):
+            safe.append(cap)
+            continue
+        p, q = geometry.p_q(cap)
+        if recenter:
+            start, end, radius = _best_capsule_center(geometry, p, q, cap['radius'])
+            minimum = max(0.1, cap['radius'] * minimum_fraction)
+        else:
+            start, end = p, q
+            radius = min(cap['radius'], geometry.radius(p, q))
+            minimum = 0.1
+        if radius < minimum:
+            skipped += 1
+            continue
+        result = dict(cap, radius=radius)
+        if start is not p:
+            result['start'] = geometry.offset_for(cap['a'], start)
+            result['end'] = geometry.offset_for(cap['b'], end)
+        if start is not p or radius < cap['radius']:
+            adjusted += 1
+        safe.append(result)
+    return safe, adjusted, skipped
+
+def prepare_export_capsules(mod, ctc, custom, auto, protect):
+    if custom:
+        if not protect or not ctc:
+            return custom, 0, 0
+        if len(ctc) >= 0x3C and not ctc[0x36]:
+            return custom, 0, 0
+        return fit_capsule_clearance(mod, ctc, custom, recenter=True, minimum_fraction=0.0)
+    if auto and ctc:
+        return fit_capsule_clearance(mod, ctc, body_capsules(mod), recenter=True)
+    return [], 0, 0

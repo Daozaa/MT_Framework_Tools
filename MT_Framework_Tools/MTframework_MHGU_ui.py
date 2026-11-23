@@ -6,7 +6,7 @@ from bpy.props import (
     StringProperty, BoolProperty, IntProperty, FloatProperty,
     FloatVectorProperty, EnumProperty, CollectionProperty
 )
-from bpy.types import Operator, Panel
+from bpy.types import Menu, Operator, Panel
 
 _BMT_XFS_B64 = "WEZTABAAAQAiAAAAAAAAAAMAAACEAQAADAAAAIwAAADkAAAA0p7IZgMAAAA8AQAABgEEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQEAAAaRBAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE4BAAABAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABBTRNxAgAAAFcBAAADAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABjAQAAAqAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAG+UfcgIAAABrAQAABQACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAdgEAAAUAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEluZm9UeXBlAG1RdWFsaXR5AEluZm9MaXN0AG1BdXRvRGVsZXRlAG1wQXJyYXkAbURpc3BGbGFnMABtRGlzcEZsYWcxAAAAAAEAAACpAgAAAQAAAAAAAAABAAAAAgAAAAEAAAADAAEAjQIAAAEAAAAAIAAAAAUAAgAQAAAAAQAAAAD8AQAAAP+BBQADABAAAAABAAAAAPwBAAAA/4EFAAQAEAAAAAEAAAAA/AEAAAD/gQUABQAQAAAAAQAAAAD8AQAAAP+BBQAGABAAAAABAAAAAPwBAAAA/4EFAAcAEAAAAAEAAAAA/AEAAAD/gQUACAAQAAAAAQAAAAD8AQAAAP+BBQAJABAAAAABAAAAAPwBAAAA/4EFAAoAEAAAAAEAAAAA/AEAAAD/gQUACwAQAAAAAQAAAAD8AQAAAP+BBQAMABAAAAABAAAAAPwBAAAA/4EFAA0AEAAAAAEAAAAA/AEAAAD/gQUADgAQAAAAAQAAAAD8AQAAAP+BBQAPABAAAAABAAAAAPwBAAAA/4EFABAAEAAAAAEAAAAA/AEAAAD/gQUAEQAQAAAAAQAAAAD8AQAAAP+BBQASABAAAAABAAAAAPwBAAAA/4EFABMAEAAAAAEAAAAA/AEAAAD/gQUAFAAQAAAAAQAAAAD8AQAAAP+BBQAVABAAAAABAAAAAPwBAAAA/4EFABYAEAAAAAEAAAAA/AEAAAD/gQUAFwAQAAAAAQAAAAD8AQAAAP+BBQAYABAAAAABAAAAAPwBAAAA/4EFABkAEAAAAAEAAAAA/AEAAAD/gQUAGgAQAAAAAQAAAAD8AQAAAP+BBQAbABAAAAABAAAAAPwBAAAA/4EFABwAEAAAAAEAAAAA/AEAAAD/gQUAHQAQAAAAAQAAAAD8AQAAAP+BBQAeABAAAAABAAAAAPwBAAAA/4EFAB8AEAAAAAEAAAAA/AEAAAD/gQUAIAAQAAAAAQAAAAD8AQAAAP+BBQAhABAAAAABAAAAAPwBAAAA/4E="
 
@@ -276,18 +276,59 @@ class MT_OT_ExportMod(Operator):
     bl_idname = "mt_framework.export_mod"
     bl_label = "导出 MOD"
     bl_description = "导出 .mod；若导入的是 .arc，会同时重建 .arc.new（可直接改名为 .arc 装机）"
+    bl_options = {'UNDO'}
 
-    filepath: StringProperty(subtype='FILE_PATH')
+    filepath: StringProperty(subtype='FILE_PATH', options={'SKIP_SAVE'})
     filter_glob: StringProperty(default="*.mod;*.arc", options={'HIDDEN'})
+    with_atlas: BoolProperty(default=False, options={'HIDDEN', 'SKIP_SAVE'})
 
     def execute(self, context):
         if not self.filepath:
             return {'CANCELLED'}
 
         from .MTframework_MHGU_phys import _export
+        if self.with_atlas:
+            return self._export_with_atlas(context, _export)
         out = _export(self, context, self.filepath)
         if not out:
             return {'CANCELLED'}
+        return {'FINISHED'}
+
+    def _export_with_atlas(self, context, export):
+        import shutil
+        import tempfile
+        from .MTframework_MHGU_atlas import atlas_for_export
+        from .MTframework_MHGU_tex import encode_tex, image_to_rgba
+
+        scene = context.scene
+        meshes = [o for o in context.selected_objects if o.type == 'MESH']
+        try:
+            img = atlas_for_export(scene, meshes)
+        except ValueError as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        arc = bpy.path.ensure_ext(os.path.abspath(bpy.path.abspath(self.filepath)), '.arc')
+        tex = os.path.splitext(arc)[0] + '_atlas.tex'
+        temp = None
+        try:
+            blob = encode_tex(image_to_rgba(img), 0x17)
+            with tempfile.NamedTemporaryFile(dir=os.path.dirname(arc), delete=False) as fh:
+                temp = fh.name
+                fh.write(blob)
+            if os.path.isfile(tex):
+                shutil.copyfile(tex, tex + '.bak')
+            if not export(self, context, arc, expect_atlas_uv=True):
+                return {'CANCELLED'}
+            os.replace(temp, tex)
+            temp = None
+        except Exception as exc:
+            self.report({'ERROR'}, '联合导出失败：%s' % exc)
+            return {'CANCELLED'}
+        finally:
+            if temp and os.path.exists(temp):
+                os.unlink(temp)
+        scene['MT_TexLastExport'] = tex
+        self.report({'INFO'}, '已单独导出图集 %s，可在工坊套用' % os.path.basename(tex))
         return {'FINISHED'}
 
     def invoke(self, context, event):
@@ -295,7 +336,11 @@ class MT_OT_ExportMod(Operator):
             arc = (context.scene.get('MT_ArcPath', '')
                    or context.scene.get('MT_ArcPathLast', '') or '')
             last = context.scene.get('MT_LastImportPath', '') or ''
-            if arc and os.path.exists(arc):
+            if self.with_atlas:
+                stem = os.path.splitext(arc)[0] if arc else 'body'
+                self.filepath = stem + '_mod.arc'
+                self.filter_glob = '*.arc'
+            elif arc and os.path.exists(arc):
                 self.filepath = arc
             elif last:
                 self.filepath = os.path.basename(last)
@@ -733,6 +778,16 @@ class MT_PT_MainPanel(Panel):
                     _op.target_set = scn.MT_TransplantSet
                     _op.target_gender = scn.MT_TransplantGender
                     _op.out_dir = scn.MT_TransplantOutDir
+                    _op.with_atlas = False
+                r = tb.row()
+                r.operator_context = 'INVOKE_DEFAULT'
+                _op = r.operator('mt_framework.part_transplant', text='带贴图导出…', icon='IMAGE_DATA')
+                _op.with_atlas = True
+                _op.target_part = 'helm'
+                _op.keep_ctc = scn.MT_TransplantKeepCtc
+                _op.target_set = scn.MT_TransplantSet
+                _op.target_gender = scn.MT_TransplantGender
+                _op.out_dir = scn.MT_TransplantOutDir
 
         if section('MT_UiTex', 'TEX 贴图', 'IMAGE_DATA', default=False):
             try:
@@ -742,6 +797,15 @@ class MT_PT_MainPanel(Panel):
                 else:
                     box = layout.box()
                     col = box.column(align=True)
+                    if hasattr(ops, 'make_atlas'):
+                        col.operator('mt_framework.make_atlas', icon='UV')
+                        image = getattr(scn, 'MT_TexImage', None)
+                        if image is not None and image.get('mt_atlas'):
+                            col.operator('mt_framework.export_mod', text='导出 ARC + 独立图集 TEX',
+                                         icon='EXPORT').with_atlas = True
+                            col.operator('mt_framework.export_tex', text='导出图集 TEX',
+                                         icon='FILE_IMAGE').atlas_settings = True
+                        col.separator()
                     row = col.row(align=True)
                     row.scale_y = 1.3
                     row.operator("mt_framework.import_tex", text="导入贴图", icon='IMAGE_DATA')
@@ -785,6 +849,7 @@ class MT_PT_MainPanel(Panel):
                         if hasattr(ops, 'phys_preset_apply'):
                             row.operator("mt_framework.phys_preset_apply",
                                          text="套用（全部）", icon='PRESET')
+                            cc.prop(scn, 'MT_PhysSkipLockedPreset')
                         if hasattr(ops, 'phys_preset_apply_selected'):
                             cc.operator("mt_framework.phys_preset_apply_selected",
                                         text="套用预设（选中骨）", icon='BONE_DATA')
@@ -820,8 +885,13 @@ class MT_PT_MainPanel(Panel):
                     xb = layout.box()
                     sub(xb, "CTC 自定义物理骨", 'OUTLINER_OB_ARMATURE')
                     xc = xb.column(align=True)
+                    xc.prop(scn, 'MT_PhysFuseOverflow')
+                    if scn.MT_PhysFuseOverflow:
+                        xc.prop(scn, 'MT_PhysFuseLimit')
                     xc.operator("mt_framework.phys_custom_register",
                                 text="登记自定义物理骨", icon='BONE_DATA')
+                    if hasattr(ops, 'phys_connect_groups'):
+                        xc.operator("mt_framework.phys_connect_groups", icon='CONSTRAINT_BONE')
                     if hasattr(ops, 'phys_rebuild_template'):
                         xc.operator("mt_framework.phys_rebuild_template",
                                     text="重建物理模板（按骨架对齐）", icon='FILE_REFRESH')
@@ -857,78 +927,64 @@ class MT_PT_MainPanel(Panel):
 
         if section('MT_UiCcl', 'CCL 碰撞胶囊', 'MOD_PHYSICS', default=False):
             try:
-
                 xb = layout.box()
-                sub(xb, "CCL 碰撞胶囊（头发 ↔ 身体避让）", 'MOD_PHYSICS')
-                xb.prop(scn, 'MT_CclEnable',
-                        text="导出时写入身体胶囊（11 个，自动开 CTC 碰撞位）")
-                try:
-                    from .MTframework_MHGU_ccl import parse_ccl as _parse_ccl, find_ccl as _find_ccl
-                    _ap = scn.get('MT_ArcPath', '') or ''
-                    _nc = _ccl_arc_count(_ap, _parse_ccl, _find_ccl)
-                    if _nc > 0:
-                        xb.label(text="当前 arc 已有 CCL：%d 个胶囊" % _nc, icon='CHECKMARK')
-                    elif _nc == 0:
-                        xb.label(text="当前 arc 没有 CCL 条目", icon='INFO')
-                except Exception as _e:
-                    _ccl_note('面板检查 arc CCL 失败: %r' % (_e,))
-                    xb.label(text="arc CCL 检查失败：%s" % type(_e).__name__, icon='ERROR')
-
-                _caps_all = _ccl_caps(scn)
-                _n_custom = len(_caps_all)
+                row = xb.row(align=True)
+                row.operator('mt_framework.ccl_fit_body', text='生成身体胶囊', icon='ADD')
+                row.operator('mt_framework.ccl_capsule_import', text='读取 ARC', icon='IMPORT')
+                caps = _ccl_caps(scn)
                 _ccl_ensure_handler(scn)
-                row = xb.row(align=True)
-                row.prop(scn, 'MT_CclIndex', text='#')
-                row.prop(scn, 'MT_CclBoneA', text='骨A')
-                row.prop(scn, 'MT_CclBoneB', text='骨B')
-                xb.prop(scn, 'MT_CclRadius', text='半径', slider=True)
-                xb.prop(scn, 'MT_CclStart', text='起点偏移')
-                xb.prop(scn, 'MT_CclEnd', text='终点偏移')
-                if _caps_all:
-                    _ci = max(0, min(_n_custom - 1, int(getattr(scn, 'MT_CclIndex', 0) or 0)))
-                    _sum = _ccl_summary(_caps_all[_ci], _ci)
-                    if bool(getattr(scn, 'MT_CclNewPending', False)):
-                        _sum += ' | 新骨待新增'
-                    xb.label(text=_sum, icon='CHECKMARK')
+                if caps:
+                    idx = min(scn.MT_CclIndex, len(caps) - 1)
+                    row = xb.row(align=True)
+                    row.menu('MT_MT_CclCapsuleSelect', text=_ccl_item_title(caps[idx], idx),
+                             icon='COLLAPSEMENU')
+                    row.operator('mt_framework.ccl_capsule_add', text='', icon='ADD')
+                    row.operator('mt_framework.ccl_capsule_del', text='', icon='REMOVE')
+                    xb.prop(scn, 'MT_CclMirror', text='左右镜像联动', toggle=True)
+                    row = xb.row(align=True)
+                    row.scale_y = 1.25
+                    row.operator_context = 'INVOKE_REGION_WIN'
+                    row.operator('mt_framework.ccl_drag_sync', text='移动 A').target = 'start'
+                    row.operator('mt_framework.ccl_drag_sync', text='移动 B').target = 'end'
+                    row.operator('mt_framework.ccl_drag_sync', text='整体移动').target = 'both'
+                    xb.prop(scn, 'MT_CclRadius', text='半径', slider=True)
+                    xb.prop(scn, 'MT_CclStart', text='A 偏移')
+                    xb.prop(scn, 'MT_CclEnd', text='B 偏移')
+                    row = xb.row(align=True)
+                    preview = scn.collection.children.get('CCL_Preview')
+                    if preview is not None and preview.get('ccl_space') == _CCL_GAME_SPACE:
+                        row.operator('mt_framework.ccl_preview_clear', text='隐藏示意', icon='HIDE_ON')
+                    else:
+                        row.operator('mt_framework.ccl_preview', text='显示示意', icon='HIDE_OFF')
+                    row.operator('mt_framework.ccl_capsule_check', text='检查间隙', icon='CHECKMARK')
+                    if _CCL_CHECK_TEXT:
+                        xb.label(text=_CCL_CHECK_TEXT[:100], icon='INFO')
                 else:
-                    xb.label(text='还没有自定义胶囊', icon='INFO')
-
-                row = xb.row(align=True)
-                _op = row.operator('mt_framework.ccl_capsule_step', text='◀ 上一条', icon='TRIA_LEFT')
-                _op.step = -1
-                _op = row.operator('mt_framework.ccl_capsule_step', text='下一条 ▶', icon='TRIA_RIGHT')
-                _op.step = 1
-                row = xb.row(align=True)
-                row.operator('mt_framework.ccl_capsule_load', text='读取该项', icon='IMPORT')
-                row.operator('mt_framework.ccl_capsule_read_bone', text='读取选中骨的胶囊', icon='BONE_DATA')
-                row = xb.row(align=True)
-                row.operator('mt_framework.ccl_capsule_store', text='应用修改', icon='CHECKMARK')
-                row.operator('mt_framework.ccl_capsule_pick', text='A/B 取选中骨', icon='POSE_HLT')
-                row.operator('mt_framework.ccl_capsule_import', text='读 arc 的 CCL', icon='FILE_REFRESH')
-                row.operator('mt_framework.ccl_capsule_check', text='检查', icon='CHECKMARK')
-
-                row = xb.row(align=True)
-                row.operator('mt_framework.ccl_capsule_add', text='新增', icon='ADD')
-                row.operator('mt_framework.ccl_capsule_del', text='删除', icon='REMOVE')
-                row.operator('mt_framework.ccl_capsule_clear', text='清空', icon='X')
-                row = xb.row(align=True)
-                row.operator('mt_framework.ccl_capsule_zero', text='偏移归零', icon='LOOP_BACK')
-                row.operator('mt_framework.ccl_capsule_swap', text='交换起终点', icon='ARROW_LEFTRIGHT')
-
-                row = xb.row(align=True)
-                row.operator('mt_framework.ccl_preview', text='生成胶囊示意', icon='SPHERE')
-                row.operator('mt_framework.ccl_preview_clear', text='清除示意', icon='TRASH')
-                row = xb.row(align=True)
-                row.scale_y = 1.25
-                row.operator('mt_framework.ccl_drag_sync', text='拖动同步（端点手柄）', icon='HAND')
-                xb.prop(scn, 'MT_CclAutoSync', text='拖动实时同步（后台处理器）')
-                xb.prop(scn, 'MT_CclAutoPreview', text='改动后自动更新示意')
-                xb.prop(scn, 'MT_CclBodyPick', text='可选胶囊本体')
-                xb.label(text=_ccl_diag_text(), icon='INFO')
-                if _CCL_CHECK_TEXT:
-                    xb.label(text=_CCL_CHECK_TEXT[:120], icon='CHECKMARK')
-                if _CCL_STAT.get('err'):
-                    xb.label(text='上次错误: %s' % str(_CCL_STAT['err'])[:90], icon='ERROR')
+                    xb.operator('mt_framework.ccl_capsule_add', text='从选中骨新增', icon='BONE_DATA')
+                xb.prop(scn, 'MT_CclEnable', text='导出 CCL 并开启 CTC 碰撞')
+                xb.prop(scn, 'MT_CclProtect', text='导出时避开静止物理链')
+                xb.prop(scn, 'MT_CclMore', text='更多选项', emboss=False,
+                        icon='TRIA_DOWN' if scn.MT_CclMore else 'TRIA_RIGHT')
+                if scn.MT_CclMore:
+                    row = xb.row(align=True)
+                    row.prop(scn, 'MT_CclBoneA', text='骨 A')
+                    row.prop(scn, 'MT_CclBoneB', text='骨 B')
+                    row.operator('mt_framework.ccl_capsule_pick', text='', icon='EYEDROPPER')
+                    if scn.MT_CclNewPending:
+                        xb.label(text='已取选中骨，可新增胶囊', icon='BONE_DATA')
+                    row = xb.row(align=True)
+                    row.operator('mt_framework.ccl_capsule_read_bone', text='定位选中骨')
+                    row.operator('mt_framework.ccl_capsule_zero', text='偏移归零')
+                    row.operator('mt_framework.ccl_capsule_swap', text='交换 A/B')
+                    row = xb.row(align=True)
+                    row.operator('mt_framework.ccl_fit_body', text='收紧已有').refit = True
+                    row.operator('mt_framework.ccl_capsule_clear', text='清空')
+                    xb.prop(scn, 'MT_CclShowAllHandles', text='显示全部端点')
+                    xb.prop(scn, 'MT_CclBodyPick', text='允许选择胶囊本体')
+                    xb.prop(scn, 'MT_CclAutoSync', text='回写视口变换')
+                    xb.prop(scn, 'MT_CclAutoPreview', text='自动显示示意')
+                    if _CCL_STAT.get('err'):
+                        xb.label(text=str(_CCL_STAT['err'])[:90], icon='ERROR')
 
             except Exception as _e:
                 box = layout.box()
@@ -1026,9 +1082,10 @@ UI_SECTIONS = (
 class MT_OT_PartTransplant(Operator):
     bl_idname = "mt_framework.part_transplant"
     bl_label = "跨部位导出（当前工程 → 目标部位）"
+    bl_options = {'UNDO'}
     bl_description = ("导出当前工程的模型，替换容器 arc 里的 .mod，"
                       "并改名到目标部位（arm/wst/leg/helm）；"
-                      "TEX 条目与 mrl 贴图路径同步改名")
+                      "只有「带贴图导出」会把合并图集写入 ARC")
 
     target_part: EnumProperty(
         name="目标部位",
@@ -1045,6 +1102,16 @@ class MT_OT_PartTransplant(Operator):
         description="same = 跟随源 arc；f/m = 强制改成女/男资源名（可跨性别移植）",
         items=[('same', '跟随源', ''), ('f', '女 f', ''), ('m', '男 m', '')])
     out_dir: StringProperty(name="输出目录", subtype='DIR_PATH', default="")
+    with_atlas: BoolProperty(default=False, options={'HIDDEN', 'SKIP_SAVE'})
+
+    def invoke(self, context, event):
+        if self.with_atlas:
+            return context.window_manager.invoke_props_dialog(self, width=340)
+        return self.execute(context)
+
+    def draw(self, context):
+        self.layout.prop(self, 'target_part')
+        self.layout.label(text='将当前图集写入目标 ARC', icon='IMAGE_DATA')
 
     def execute(self, context):
         import base64
@@ -1065,20 +1132,30 @@ class MT_OT_PartTransplant(Operator):
                         '或到模型区点「选择 arc 容器」选原版 body.arc')
             return {'CANCELLED'}
 
-        tmpdir = tempfile.mkdtemp(prefix='mt_transplant_')
-        tmp_mod = os.path.join(tmpdir, 'export.mod')
-
         prev_sel = [o for o in context.selected_objects]
         prev_active = context.view_layer.objects.active
 
         sel_meshes = [o for o in context.selected_objects
                       if o.type == 'MESH' and len(o.data.vertices) > 0
                       and not o.hide_get()]
+        atlas_image = None
+        if self.with_atlas:
+            from .MTframework_MHGU_atlas import atlas_for_export
+            from .MTframework_MHGU_export import split_hidden_meshes
+
+            if sc.MT_SkipHidden:
+                sel_meshes, _ = split_hidden_meshes(sel_meshes)
+            try:
+                atlas_image = atlas_for_export(sc, sel_meshes)
+            except ValueError as exc:
+                self.report({'ERROR'}, str(exc))
+                return {'CANCELLED'}
         meshes = sel_meshes or [o for o in context.view_layer.objects
                                 if o.type == 'MESH' and len(o.data.vertices) > 0
                                 and not o.hide_get()]
         print('[MT] 跨部位导出：%d 个网格（%s）' % (
             len(meshes), '选中' if sel_meshes else '全部可见'))
+        skip_arc_build = sc.get('MT_SkipArcBuild', False)
         try:
             bpy.ops.object.select_all(action='DESELECT')
             for o in meshes:
@@ -1089,12 +1166,18 @@ class MT_OT_PartTransplant(Operator):
             if meshes:
                 context.view_layer.objects.active = meshes[0]
             sc['MT_SkipArcBuild'] = True
-            out_mod = _export(self, context, tmp_mod)
+            with tempfile.TemporaryDirectory(prefix='mt_transplant_') as temp:
+                out_mod = _export(self, context, os.path.join(temp, 'export.mod'),
+                                  expect_atlas_uv=self.with_atlas)
+                if not out_mod:
+                    return {'CANCELLED'}
+                with open(out_mod, 'rb') as f:
+                    new_mod = f.read()
         except Exception as e:
             self.report({'ERROR'}, '导出当前工程失败：%s' % e)
             return {'CANCELLED'}
         finally:
-            sc['MT_SkipArcBuild'] = False
+            sc['MT_SkipArcBuild'] = skip_arc_build
             try:
                 bpy.ops.object.select_all(action='DESELECT')
                 for o in prev_sel:
@@ -1105,15 +1188,6 @@ class MT_OT_PartTransplant(Operator):
                 context.view_layer.objects.active = prev_active
             except Exception:
                 pass
-        if not out_mod or not os.path.exists(out_mod):
-            self.report({'ERROR'}, '导出当前工程失败（没有生成 .mod）')
-            return {'CANCELLED'}
-        try:
-            with open(out_mod, 'rb') as f:
-                new_mod = f.read()
-        except Exception as e:
-            self.report({'ERROR'}, '读取临时 .mod 失败：%s' % e)
-            return {'CANCELLED'}
         if new_mod[:4] != MOD_MAGIC:
             self.report({'ERROR'}, '导出的不是 .mod（文件头不对）')
             return {'CANCELLED'}
@@ -1275,32 +1349,45 @@ class MT_OT_PartTransplant(Operator):
             else:
                 out_entries.append(_ctc_e)
 
-        _caps_written2 = []
+        ctc_entry = next((e for e in out_entries if e['body'][:4] == CTC_MAGIC), None)
+        if ctc_entry and sc.MT_PhysSegment:
+            from .MTframework_MHGU_ctc import set_segment_shapes
+            ctc_entry['body'] = set_segment_shapes(ctc_entry['body'], True)[0]
+            ctc_entry['raw'] = zlib.compress(ctc_entry['body'], 9)
+
+        written_caps, adjusted, skipped = [], 0, 0
+        custom = []
+        expect_ccl = None
         if self.target_part == 'helm' and mod_name:
             try:
-                from . import MTframework_MHGU_ccl as _CCL2
-                _caps2 = _CCL2.capsules_from_json(
-                    getattr(sc, 'MT_CclCapsules', '') or '')
-                if not _caps2 and bool(getattr(sc, 'MT_CclEnable', False)):
-                    _caps2 = _CCL2.body_capsules(new_mod)
-                if _caps2:
-                    _CCL2.apply_to_entries(
-                        out_entries, mod_name, _CCL2.build_ccl(_caps2))
-                    _caps_written2 = list(_caps2)
-                    print('[MT] 跨部位导出：已写入 CCL %d 个胶囊' % len(_caps2))
-                    for _e in out_entries:
-                        if _e['body'][:4] != CTC_MAGIC:
-                            continue
-                        _nb, _nf = _CCL2.enable_collision_flags(_e['body'])
-                        if _nf:
-                            _e['body'] = _nb
-                            _e['raw'] = zlib.compress(_nb, 9)
-                            print('[MT] 跨部位导出：CTC 碰撞位 %d 组' % _nf)
-                else:
-                    print('[MT] 跨部位导出：没有胶囊（自定义为空且未勾 CCL）')
-            except Exception as _ec:
-                print('[MT] 跨部位导出 CCL 失败:', _ec)
+                from . import MTframework_MHGU_ccl as ccl
+                custom = _ccl_caps(sc)
+                source_ctc = ctc_entry['body'] if ctc_entry else b''
+                written_caps, adjusted, skipped = ccl.prepare_export_capsules(
+                    new_mod, source_ctc, custom, sc.MT_CclEnable, sc.MT_CclProtect)
+                if written_caps:
+                    ccl.apply_to_entries(out_entries, mod_name, ccl.build_ccl(written_caps))
+                    expect_ccl = True
+                    if ctc_entry:
+                        updated, _ = ccl.enable_collision_flags(source_ctc)
+                        ctc_entry['body'] = updated
+                        ctc_entry['raw'] = zlib.compress(updated, 9)
+                elif custom and skipped:
+                    ccl.apply_to_entries(out_entries, mod_name, None)
+                    expect_ccl = False
+            except (ValueError, RuntimeError, struct.error) as exc:
+                self.report({'ERROR'}, 'CCL 检查失败：' + str(exc))
+                return {'CANCELLED'}
 
+        if atlas_image is not None:
+            from .MTframework_MHGU_atlas_bind import bind_atlas
+            from .MTframework_MHGU_tex import encode_tex, image_to_rgba
+
+            try:
+                atlas_path = bind_atlas(out_entries, encode_tex(image_to_rgba(atlas_image), 0x17))
+            except (ValueError, RuntimeError, struct.error) as exc:
+                self.report({'ERROR'}, '图集写入失败：%s' % exc)
+                return {'CANCELLED'}
         raw_dir = (self.out_dir or '').strip().strip('"')
         if raw_dir:
             out_dir = os.path.normpath(bpy.path.abspath(raw_dir))
@@ -1318,13 +1405,18 @@ class MT_OT_PartTransplant(Operator):
         try:
             from .MTframework_MHGU_verify import write_arc_verified
             write_arc_verified(dst, arc_bytes,
-                               caps=_caps_written2 or None,
-                               want_ccl=True if _caps_written2 else None)
+                               caps=written_caps or None,
+                               want_ccl=expect_ccl)
         except ValueError as e:
             self.report({'ERROR'}, '跨部位导出校验失败：%s' % e)
             return {'CANCELLED'}
-        self.report({'INFO'}, '已从当前工程导出：%s（%d 骨）'
-                    % (dst, struct.unpack_from('<H', new_mod, 6)[0]))
+        if adjusted or skipped:
+            _ccl_after_export(context, written_caps, adjusted, skipped, bool(custom), self.report)
+        if atlas_image is not None:
+            self.report({'INFO'}, '已导出 %s，内嵌图集 %s' % (dst, atlas_path.rsplit('\\', 1)[-1]))
+        else:
+            self.report({'INFO'}, '已从当前工程导出：%s（%d 骨）'
+                        % (dst, struct.unpack_from('<H', new_mod, 6)[0]))
         return {'FINISHED'}
 
 _CCL_ACTIVE = False
@@ -1343,8 +1435,6 @@ _CCL_STAT = {'call': 0, 'seen': 0, 'chg': 0, 'err': ''}
 
 _CCL_CAPS_CACHE = {'text': None, 'caps': []}
 
-_CCL_ARC_CACHE = {'key': None, 'n': -1}
-
 _CCL_BUILD_NOTE = ''
 
 _CCL_CHECK_TEXT = ''
@@ -1357,31 +1447,6 @@ def _ccl_note(msg):
         print('[MT] CCL: ' + _CCL_STAT['err'])
     except Exception:
         pass
-
-def _ccl_arc_count(path, parse_ccl, find_ccl):
-    if not path or not os.path.isfile(path):
-        return -1
-    try:
-        st = os.stat(path)
-        key = (path, st.st_mtime, st.st_size)
-    except Exception as e:
-        _ccl_note('arc 状态读取失败: %r' % (e,))
-        return -1
-    if _CCL_ARC_CACHE['key'] == key:
-        return _CCL_ARC_CACHE['n']
-    from .MTframework_MHGU_phys import arc_entries
-    with open(path, 'rb') as fh:
-        entries = arc_entries(fh.read())
-    e = find_ccl(entries)
-    n = len(parse_ccl(e['body'])) if e is not None else 0
-    _CCL_ARC_CACHE['key'] = key
-    _CCL_ARC_CACHE['n'] = n
-    return n
-
-def _ccl_diag_text():
-    st = _CCL_STAT
-    return 'sync: 调用%d 识别%d 改动%d | handler %s' % (
-        st['call'], st['seen'], st['chg'], '开' if _ccl_mounted() else '关')
 
 def _ccl_mounted():
     try:
@@ -1488,6 +1553,43 @@ def _ccl_summary(c, idx):
         c['start'][0], c['start'][1], c['start'][2],
         c['end'][0], c['end'][1], c['end'][2])
 
+_CCL_BODY_NAMES = {
+    (0, 0): '骨盆', (0, 2): '躯干', (3, 4): '头颈',
+    (6, 7): '左上臂', (7, 8): '左前臂', (10, 11): '右上臂', (11, 12): '右前臂',
+    (14, 15): '左大腿', (15, 16): '左小腿', (17, 18): '右大腿', (18, 19): '右小腿',
+}
+
+def _ccl_item_title(cap, idx):
+    a, b = int(cap['a']), int(cap['b'])
+    region = _CCL_BODY_NAMES.get(tuple(sorted((a, b))), '骨 %d → %d' % (a, b))
+    return '#%d  %s' % (idx, region)
+
+class MT_MT_CclCapsuleSelect(Menu):
+    bl_idname = 'MT_MT_CclCapsuleSelect'
+    bl_label = '选择胶囊'
+
+    def draw(self, context):
+        current = context.scene.MT_CclIndex
+        for idx, cap in enumerate(_ccl_caps(context.scene)):
+            self.layout.operator('mt_framework.ccl_capsule_select', text=_ccl_item_title(cap, idx),
+                                 icon='RADIOBUT_ON' if idx == current else 'RADIOBUT_OFF').index = idx
+
+class MT_OT_CclCapsuleSelect(Operator):
+    bl_idname = 'mt_framework.ccl_capsule_select'
+    bl_label = '切换当前胶囊'
+
+    index: IntProperty(min=0)
+
+    def execute(self, context):
+        sc = context.scene
+        caps = _ccl_caps(sc)
+        if self.index >= len(caps):
+            return {'CANCELLED'}
+        sc.MT_CclNewPending = False
+        _ccl_panel_from(sc, caps, self.index)
+        _ccl_handle_visibility(sc, context)
+        return {'FINISHED'}
+
 def _ccl_bone_game_id(name, index, rec_ids=None, name_map=None):
     import re
     rec = None
@@ -1542,8 +1644,11 @@ def _ccl_selected_bones(context):
     return arm, [(n, _ccl_bone_game_id(n, order.get(n, 0), rec_ids, _name_map))
                  for n in names]
 
+_CCL_GAME_SPACE = 3
+
 def _ccl_cache_put(col, arm, S, bones):
     col['ccl_arm'] = arm.name
+    col['ccl_space'] = _CCL_GAME_SPACE
     col['ccl_S'] = float(S)
 
     d = {}
@@ -1557,7 +1662,7 @@ def _ccl_cache_put(col, arm, S, bones):
 
 def _ccl_cache_get(col):
     try:
-        if col is None:
+        if col is None or col.get('ccl_space') != _CCL_GAME_SPACE:
             return None, 1.0, {}
         arm = bpy.data.objects.get(str(col.get('ccl_arm', '') or ''))
         S = float(col.get('ccl_S', 1.0) or 1.0)
@@ -1619,24 +1724,14 @@ def _ccl_mod_bytes(context):
     return b''
 
 def _ccl_mod_info(context):
-    import struct
+    from .MTframework_MHGU_ccl import _bone_worlds
     mod = _ccl_mod_bytes(context)
     if not mod:
         return b'', 1.0, {}
     try:
-        n = struct.unpack_from('<H', mod, 6)[0]
-        ptr = struct.unpack_from('<I', mod, 36)[0]
-        lmat = ptr + n * 24
-        wmat = lmat + n * 64
-        s = abs(struct.unpack_from('<f', mod, wmat)[0])
-        S = s if s > 1e-6 else 1.0
-        bones = {}
-        for rec in range(n):
-            v = struct.unpack_from('<16f', mod, wmat + rec * 64)
-            R = ((v[0] / S, v[4] / S, v[8] / S),
-                 (v[1] / S, v[5] / S, v[9] / S),
-                 (v[2] / S, v[6] / S, v[10] / S))
-            bones[int(mod[ptr + rec * 24])] = (rec, R, (v[12], v[13], v[14]))
+        worlds, S = _bone_worlds(mod)
+        bones = {bid: (rec, tuple(map(tuple, mat[:3, :3])), tuple(mat[:3, 3]))
+                 for rec, (bid, mat) in enumerate(worlds)}
         return mod, S, bones
     except Exception as e:
         _ccl_note('解析 .mod 骨矩阵失败: %r' % (e,))
@@ -1684,24 +1779,127 @@ def _ccl_bone_now(arm, bone):
     return arm.matrix_world @ bone.matrix_local
 
 def _ccl_point(arm, bone, R, S, offset):
-    from mathutils import Vector
-    from .MTframework_MHGU import convert_bone_position
-    o = Vector(offset)
-    d = Vector((R[0][0] * o.x + R[0][1] * o.y + R[0][2] * o.z,
-                R[1][0] * o.x + R[1][1] * o.y + R[1][2] * o.z,
-                R[2][0] * o.x + R[2][1] * o.y + R[2][2] * o.z))
-    rest = bone.matrix_local
-    local = rest.inverted() @ (bone.head_local + convert_bone_position(d / S))
+    local = bone.matrix_local.inverted() @ _ccl_rest_point(arm, bone, R, S, offset)
     return _ccl_bone_now(arm, bone) @ local
 
-def _ccl_offset(arm, bone, R, S, world):
-    from mathutils import Vector, Matrix
-    rest = bone.matrix_local
-    p = (rest @ (_ccl_bone_now(arm, bone).inverted() @ Vector(world))) - bone.head_local
+def _ccl_rest_point(arm, bone, R, S, offset):
+    from mathutils import Matrix, Vector
+    from .MTframework_MHGU import convert_bone_position
 
-    g = Vector((-p.x, -p.z, p.y)) * S
-    Rm = Matrix(R)
-    return Rm.transposed() @ g
+    delta = -convert_bone_position((Matrix(R) @ Vector(offset)) / S)
+    return bone.head_local + arm.matrix_world.to_3x3().inverted() @ delta
+
+def _ccl_offset(arm, bone, R, S, world):
+    from mathutils import Vector
+    point = bone.matrix_local @ (_ccl_bone_now(arm, bone).inverted() @ Vector(world))
+    return _ccl_rest_offset(arm, bone, R, S, point)
+
+def _ccl_rest_offset(arm, bone, R, S, point):
+    from mathutils import Matrix, Vector
+    p = arm.matrix_world.to_3x3() @ (point - bone.head_local)
+    g = Vector((p.x, p.z, -p.y)) * S
+    return Matrix(R).inverted() @ g
+
+_CCL_PLAYER_PAIRS = ((5, 9), (6, 10), (7, 11), (8, 12), (14, 17), (15, 18), (16, 19))
+_CCL_PLAYER_MIRROR = {a: b for pair in _CCL_PLAYER_PAIRS for a, b in (pair, pair[::-1])}
+
+def _ccl_mirror_edits(sc, caps, changes, arm, S, bones):
+    if not sc.MT_CclMirror or not changes or arm is None:
+        return set()
+    root = arm.data.bones.get('b_1')
+    if root is None:
+        roots = [bone for bone in arm.data.bones if bone.parent is None]
+        if len(roots) != 1:
+            return set()
+        root = roots[0]
+    center = root.head_local.x
+    targets = {}
+    for bid, (name, rotation) in bones.items():
+        bone = arm.data.bones.get(name)
+        if bone is not None:
+            targets[bid] = (bone, rotation)
+    ids = {bone.name.lower(): bid for bid, (bone, _) in targets.items()}
+
+    def reflect(point):
+        point.x = 2.0 * center - point.x
+        return point
+
+    center_tolerance = max(1e-5, min(0.001, 0.25 / S))
+    pair_tolerance = max(1e-5, min(0.008, 1.5 / S))
+
+    def near_mirror(bone):
+        point = reflect(bone.head_local.copy())
+        return [bid for bid, (other, _) in targets.items()
+                if (other.head_local.x - center) * (bone.head_local.x - center) < 0.0
+                and (point - other.head_local).length < pair_tolerance]
+
+    def opposite(bid):
+        if bid not in targets:
+            return None
+        bone, _ = targets[bid]
+        name = bone.name.lower()
+        partner = None
+        if name.endswith(('.l', '.r', '_l', '_r', '-l', '-r')):
+            partner = ids.get(name[:-1] + ('r' if name[-1] == 'l' else 'l'))
+        elif name.startswith(('左', '右')):
+            partner = ids.get(('右' if name[0] == '左' else '左') + name[1:])
+        if partner is not None:
+            return partner
+        if abs(bone.head_local.x - center) < center_tolerance:
+            return bid
+        other = _CCL_PLAYER_MIRROR.get(bid)
+        if root.name == 'b_1' and other in targets:
+            point = reflect(bone.head_local.copy())
+            if (point - targets[other][0].head_local).length < pair_tolerance:
+                return other
+        candidates = near_mirror(bone)
+        if len(candidates) == 1 and near_mirror(targets[candidates[0]][0]) == [bid]:
+            return candidates[0]
+        return None
+
+    pairs = [(int(c['a']), int(c['b'])) for c in caps]
+    changed = set()
+    for idx, fields in changes.items():
+        a, b = pairs[idx]
+        pair = (opposite(a), opposite(b))
+        if None in pair or pair in ((a, b), (b, a)):
+            continue
+        matches = [i for i, ids in enumerate(pairs) if ids in (pair, pair[::-1])]
+        if len(matches) != 1 or sum(ids in ((a, b), (b, a)) for ids in pairs) != 1:
+            continue
+        other = matches[0]
+        if other in changes:
+            continue
+        source, dest = caps[idx], caps[other]
+        reversed_order = pairs[other] != pair
+        if 'radius' in fields:
+            dest['radius'] = source['radius']
+        for field, src_id, dst_id, reverse_field in (
+                ('start', a, pair[0], 'end'), ('end', b, pair[1], 'start')):
+            if field in fields:
+                point = _ccl_rest_point(arm, *targets[src_id], S, source[field])
+                dest[reverse_field if reversed_order else field] = tuple(
+                    _ccl_rest_offset(arm, *targets[dst_id], S, reflect(point)))
+        changed.add(other)
+    return changed
+
+def _ccl_edit_bindings(context, caps, col):
+    ids = {int(c[key]) for c in caps for key in ('a', 'b')}
+    if col is not None and context.scene.collection.children.get(col.name) == col:
+        arm, S, bones = _ccl_cache_get(col)
+        if arm is not None and ids <= bones.keys():
+            return arm, S, bones
+    from .MTframework_MHGU_phys import _phys_armature
+    arm = _phys_armature(context)
+    if arm is None:
+        return None, 1.0, {}
+    _, S, records = _ccl_mod_info(context)
+    bones = {}
+    for bid in ids:
+        bone, _, rotation, _ = _ccl_record_bone(arm, records, bid)
+        if bone is not None:
+            bones[bid] = (bone.name, rotation)
+    return arm, S, bones
 
 def _ccl_capsule_geometry(pa, pb, r, segs=16, rings=4):
     from mathutils import Vector, Quaternion
@@ -1793,14 +1991,11 @@ def _ccl_capsule_material():
     return m
 
 def _ccl_handle_size(r):
-    try:
-        return max(0.02, min(0.16, float(r) * 1.15))
-    except Exception:
-        return 0.03
+    return max(0.018, min(0.065, r * 0.45))
 
 def _ccl_style_handle(ob, role, r):
     try:
-        ob.empty_display_type = 'CIRCLE'
+        ob.empty_display_type = 'SPHERE'
         ob.empty_display_size = _ccl_handle_size(r)
         ob.show_in_front = True
         ob.show_name = True
@@ -1882,6 +2077,24 @@ def _ccl_preview_obj(role, idx, col=None):
         if ob.get('ccl_role') == role and int(ob.get('ccl_index', -1)) == int(idx):
             return ob
     return None
+
+def _ccl_handle_visibility(scene, context):
+    col = bpy.data.collections.get('CCL_Preview')
+    if col is None or scene.collection.children.get(col.name) != col:
+        return
+    for ob in col.objects:
+        role = ob.get('ccl_role')
+        if role not in ('start', 'end', 'move_a', 'move_b', 'label'):
+            continue
+        if context.view_layer.objects.get(ob.name) != ob:
+            continue
+        current = int(ob.get('ccl_index', -1)) == scene.MT_CclIndex
+        hide = (role in ('move_a', 'move_b')
+                or (not current and not scene.MT_CclShowAllHandles))
+        if ob.hide_get(view_layer=context.view_layer) != hide:
+            ob.hide_set(hide, view_layer=context.view_layer)
+        if not hide and role in ('start', 'end') and ob.empty_display_type == 'CIRCLE':
+            _ccl_style_handle(ob, role, ob.empty_display_size / 1.15)
 
 def _ccl_endpoints(cap, arm, S, bones):
     ia = bones.get(int(cap['a']))
@@ -1972,7 +2185,7 @@ def _ccl_place_item(idx, caps, arm, S, bones, col=None):
     if pts is None:
         return 0
     pa, pb = pts
-    for role, pos in (('start', pa), ('end', pb)):
+    for role, pos in (('start', pa), ('end', pb), ('move_a', pa), ('move_b', pb)):
         ob = _ccl_preview_obj(role, idx, col)
         if ob is None:
             continue
@@ -1980,6 +2193,8 @@ def _ccl_place_item(idx, caps, arm, S, bones, col=None):
             m = ob.matrix_world.copy()
             m.translation = pos
             ob.matrix_world = m
+            if role in ('move_a', 'move_b'):
+                ob['ccl_world'] = tuple(pos)
         except Exception:
             pass
     return _ccl_refresh_item(idx, caps, arm, S, bones, col)
@@ -2068,10 +2283,10 @@ def _ccl_clear_preview(context=None):
         data = ob.data
         bpy.data.objects.remove(ob, do_unlink=True)
         if data is not None and data.users == 0:
-            try:
+            if isinstance(data, bpy.types.Mesh):
                 bpy.data.meshes.remove(data)
-            except Exception:
-                pass
+            elif isinstance(data, bpy.types.Curve):
+                bpy.data.curves.remove(data)
     try:
         bpy.data.collections.remove(col)
     except Exception as e:
@@ -2116,7 +2331,7 @@ def _ccl_build_preview(context, quiet=False):
         pb = _ccl_point(arm, bb, Rb, S, c['end'])
         radius = float(c['radius'])
         r = radius / S
-        o = bpy.data.objects.new('CCL%d_Start' % i, None)
+        o = bpy.data.objects.new('CCL%d_A' % i, None)
         _ccl_style_handle(o, 'start', r)
         o['ccl_role'] = 'start'
         o['ccl_index'] = i
@@ -2124,7 +2339,7 @@ def _ccl_build_preview(context, quiet=False):
         o['ccl_bone_name'] = ba.name
         o.matrix_world = Matrix.Translation(pa)
         col.objects.link(o)
-        e = bpy.data.objects.new('CCL%d_End_r%.1f' % (i, radius), None)
+        e = bpy.data.objects.new('CCL%d_B' % i, None)
         _ccl_style_handle(e, 'end', r)
         e['ccl_role'] = 'end'
         e['ccl_index'] = i
@@ -2158,6 +2373,8 @@ def _ccl_build_preview(context, quiet=False):
             cu.body = '#%d r%.1f' % (i, radius)
             cu.size = max(0.01, r * 0.45)
             tx = bpy.data.objects.new('CCL%d_Label' % i, cu)
+            tx.hide_render = True
+            tx.hide_select = True
             tx.location = pb + Vector((0.0, 0.0, r * 1.15))
             tx['ccl_role'] = 'label'
             tx['ccl_index'] = i
@@ -2174,6 +2391,7 @@ def _ccl_build_preview(context, quiet=False):
 
         _ccl_follow_pose(sc, col)
         _CCL_POSE_SIG = _ccl_pose_sig(arm, col)
+        _ccl_handle_visibility(sc, context)
         if missing:
             _CCL_BUILD_NOTE = '有 %d 个骨 id 在 .mod 里找不到：%s' % (
                 len(missing), ','.join(str(v) for v in sorted(missing)))
@@ -2198,6 +2416,9 @@ def _ccl_sync_from_preview(scene=None, force=False, _col=None):
         col = _col or bpy.data.collections.get('CCL_Preview')
         if col is None:
             return 0
+        if col.get('ccl_space') != _CCL_GAME_SPACE:
+            _ccl_schedule_rebuild()
+            return 0
 
         _CCL_GUARD = True
         try:
@@ -2219,7 +2440,7 @@ def _ccl_sync_from_preview(scene=None, force=False, _col=None):
         try:
             seen = 0
             chg = 0
-            touched = set()
+            changes = {}
 
             for ob in col.objects:
                 if ob.get('ccl_role') != 'capsule':
@@ -2236,7 +2457,7 @@ def _ccl_sync_from_preview(scene=None, force=False, _col=None):
                     ob.scale = (1.0, 1.0, 1.0)
                     ob['ccl_radius'] = rad
                     chg += 1
-                    touched.add(idx)
+                    changes.setdefault(idx, set()).add('radius')
                 old_c = ob.get('ccl_center', None)
                 if old_c is not None:
                     from mathutils import Vector
@@ -2254,7 +2475,7 @@ def _ccl_sync_from_preview(scene=None, force=False, _col=None):
                             caps[idx]['end'] = tuple(
                                 _ccl_offset(arm, bb, ib[1], S, pts[1] + d))
                             chg += 2
-                            touched.add(idx)
+                            changes.setdefault(idx, set()).update(('start', 'end'))
 
                             for _role in ('start', 'end', 'move_a', 'move_b'):
                                 e2 = _ccl_preview_obj(_role, idx, col)
@@ -2294,7 +2515,7 @@ def _ccl_sync_from_preview(scene=None, force=False, _col=None):
                     caps[idx]['end'] = tuple(
                         _ccl_offset(arm, bb, ib[1], S, pts[1] + d))
                     chg += 2
-                    touched.add(idx)
+                    changes.setdefault(idx, set()).update(('start', 'end'))
 
                     for _role in ('start', 'end', 'move_a', 'move_b'):
                         e2 = _ccl_preview_obj(_role, idx, col)
@@ -2327,7 +2548,7 @@ def _ccl_sync_from_preview(scene=None, force=False, _col=None):
                 if max(abs(off[i] - float(old[i])) for i in range(3)) > 1e-4:
                     caps[idx][key] = tuple(float(v) for v in off)
                     chg += 1
-                    touched.add(idx)
+                    changes.setdefault(idx, set()).add(key)
                 k2 = (abs(ob.scale.x) + abs(ob.scale.y) + abs(ob.scale.z)) / 3.0
                 if abs(k2 - 1.0) > 1e-5:
                     try:
@@ -2338,24 +2559,22 @@ def _ccl_sync_from_preview(scene=None, force=False, _col=None):
             _CCL_STAT['seen'] += seen
             if chg:
                 _CCL_STAT['chg'] += chg
+                mirrored = _ccl_mirror_edits(sc, caps, changes, arm, S, bones)
                 _set_ccl_capsules(sc, caps)
 
                 cur = int(getattr(sc, 'MT_CclIndex', 0) or 0)
-                if touched and cur not in touched:
-                    cur = min(touched)
+                if cur not in changes:
+                    cur = min(changes)
                 _ccl_panel_from(sc, caps, cur)
+                if bpy.context.scene == sc:
+                    _ccl_handle_visibility(sc, bpy.context)
 
-                for _i in sorted(touched):
+                for _i in sorted(changes.keys() | mirrored):
                     try:
-                        _ccl_refresh_item(_i, caps, arm, S, bones, col)
+                        _ccl_place_item(_i, caps, arm, S, bones, col)
                     except Exception:
                         pass
-
-                try:
-                    _ccl_follow_pose(sc, col)
-                except Exception:
-                    pass
-            _CCL_SIG = sig
+            _CCL_SIG = _ccl_preview_signature(col) if chg else sig
             return chg
         finally:
             _CCL_GUARD = False
@@ -2366,13 +2585,16 @@ def _ccl_sync_from_preview(scene=None, force=False, _col=None):
         return 0
 
 def _ccl_depsgraph_update(scene, depsgraph=None):
-    if _CCL_GUARD:
+    if _CCL_GUARD or _CCL_UI_GUARD or _CCL_DRAGGING:
         return
     global _CCL_POSE_SIG, _CCL_SIG
     try:
         col = bpy.data.collections.get('CCL_Preview')
         if col is None:
             _ccl_unmount_handler()
+            return
+        if col.get('ccl_space') != _CCL_GAME_SPACE:
+            _ccl_schedule_rebuild()
             return
         arm, S, bones = _ccl_cache_get(col)
         sigp = _ccl_pose_sig(arm, col) if arm is not None else None
@@ -2393,6 +2615,18 @@ def _ccl_auto_refresh(context):
         return 0
     return _ccl_build_preview(context, quiet=True)
 
+def _ccl_after_export(context, caps, adjusted, skipped, custom, report):
+    scene = context.scene
+    if custom and caps:
+        _set_ccl_capsules(scene, caps)
+        _ccl_panel_from(scene, caps, min(scene.MT_CclIndex, len(caps) - 1))
+        if scene.MT_CclAutoPreview or scene.collection.children.get('CCL_Preview') is not None:
+            _ccl_build_preview(context, quiet=True)
+    message = f'CCL 已避开静止物理链，调整 {adjusted} 个，跳过 {skipped} 个空间不足项'
+    print('[MT] ' + message)
+    if report is not None:
+        report({'WARNING'} if skipped else {'INFO'}, message)
+
 def _ccl_props_to_capsule(sc):
     return {'a': int(sc.MT_CclBoneA), 'b': int(sc.MT_CclBoneB),
             'start': tuple(float(v) for v in sc.MT_CclStart),
@@ -2404,6 +2638,68 @@ def _ccl_find_capsule_for_bone(caps, bid):
         if int(c['a']) == int(bid) or int(c['b']) == int(bid):
             return i
     return -1
+
+def _ccl_clearance_state(context):
+    from .MTframework_MHGU_ctc import set_segment_shapes
+    from .MTframework_MHGU_phys import _phys_armature, recalled_arc
+    from mathutils import Vector
+
+    mod, scale, infos = _ccl_mod_info(context)
+    arm = _phys_armature(context)
+    if not infos or arm is None:
+        raise ValueError('请先导入身体骨架并登记物理骨')
+    root_id = min(infos, key=lambda ident: infos[ident][0])
+    root, _, _, origin = _ccl_record_bone(arm, infos, root_id)
+    if root is None:
+        raise ValueError('找不到当前骨架的根骨')
+    positions = {}
+    for ident in infos:
+        bone, _, _, _ = _ccl_record_bone(arm, infos, ident)
+        if bone is not None:
+            p = arm.matrix_world.to_3x3() @ (bone.head_local - root.head_local)
+            positions[ident] = Vector(origin) + Vector((p.x, p.z, -p.y)) * scale
+    ctc = recalled_arc(context)[1]
+    if ctc and context.scene.MT_PhysSegment:
+        ctc = set_segment_shapes(ctc, True)[0]
+    return mod, ctc, positions
+
+class MT_OT_CclFitBody(Operator):
+    bl_idname = 'mt_framework.ccl_fit_body'
+    bl_label = '生成或收紧身体胶囊'
+    bl_description = '按静止 CTC 链隔出余量；生成后可继续调整半径和两端偏移'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    refit: BoolProperty(default=False, options={'HIDDEN'})
+    margin: FloatProperty(name='物理骨间隙', default=0.75, min=0.1, max=50.0)
+
+    def execute(self, context):
+        from .MTframework_MHGU_ccl import body_capsules, fit_capsule_clearance
+
+        sc = context.scene
+        current = _ccl_caps(sc)
+        if current and not self.refit:
+            self.report({'ERROR'}, '已有自定义胶囊，使用「收紧已有」保留端点偏移')
+            return {'CANCELLED'}
+        if self.refit and not current:
+            self.report({'ERROR'}, '没有自定义胶囊可收紧')
+            return {'CANCELLED'}
+        try:
+            mod, ctc, positions = _ccl_clearance_state(context)
+            candidates = current if self.refit else body_capsules(mod, positions=positions)
+            caps, adjusted, skipped = fit_capsule_clearance(
+                mod, ctc, candidates, self.margin, positions, recenter=not self.refit)
+            if not caps:
+                raise ValueError('找不到厚度合适且避开物理链的身体胶囊，请手动调整端点偏移')
+        except (ValueError, RuntimeError) as exc:
+            self.report({'ERROR'}, str(exc))
+            return {'CANCELLED'}
+        _set_ccl_capsules(sc, caps)
+        sc.MT_CclEnable = True
+        sc.MT_CclNewPending = False
+        _ccl_panel_from(sc, caps, 0)
+        _ccl_auto_refresh(context)
+        self.report({'INFO'}, '胶囊 %d 个，调整 %d 个，跳过 %d 个空间不足项' % (len(caps), adjusted, skipped))
+        return {'FINISHED'}
 
 class MT_OT_CclCapsuleAdd(Operator):
     bl_idname = "mt_framework.ccl_capsule_add"
@@ -2489,6 +2785,7 @@ def _ccl_index_update(self, context):
         idx = int(getattr(self, 'MT_CclIndex', 0) or 0)
         self.MT_CclNewPending = False
         _ccl_panel_from(self, caps, idx)
+        _ccl_handle_visibility(self, context)
     except Exception as e:
         _ccl_note('切换序号读取失败: %r' % (e,))
 
@@ -2507,7 +2804,8 @@ def _ccl_deferred_rebuild():
 
 def _ccl_schedule_rebuild():
     try:
-        bpy.app.timers.register(_ccl_deferred_rebuild, first_interval=0.05)
+        if not bpy.app.timers.is_registered(_ccl_deferred_rebuild):
+            bpy.app.timers.register(_ccl_deferred_rebuild, first_interval=0.05)
     except Exception:
         _ccl_deferred_rebuild()
 
@@ -2535,27 +2833,26 @@ def _ccl_prop_update(self, context):
         if same:
             return
         bones_changed = (na != int(c['a']) or nb != int(c['b']))
-        c['a'], c['b'] = na, nb
-        c['start'] = ns
-        c['end'] = ne
-        c['radius'] = nr
+        edited = {'a': na, 'b': nb, 'start': ns, 'end': ne, 'radius': nr}
+        fields = {key for key in ('start', 'end', 'radius') if c[key] != edited[key]}
+        caps[idx] = edited
         _CCL_UI_GUARD = True
         try:
-            _set_ccl_capsules(sc, caps)
             col = bpy.data.collections.get('CCL_Preview')
-            arm = S = bones = None
-            if col is not None:
-                try:
-                    arm, S, bones = _ccl_cache_get(col)
-                except Exception:
-                    arm = None
-            if arm is not None:
+            arm, S, bones = _ccl_cache_get(col)
+            mirrored = set()
+            if sc.MT_CclMirror and not bones_changed:
+                arm, S, bones = _ccl_edit_bindings(context, caps, col)
+                mirrored = _ccl_mirror_edits(sc, caps, {idx: fields}, arm, S, bones)
+            _set_ccl_capsules(sc, caps)
+            if col is not None and arm is not None:
                 if bones_changed:
                     if bool(getattr(sc, 'MT_CclAutoPreview', True)):
                         _ccl_schedule_rebuild()
                 else:
-                    _ccl_place_item(idx, caps, arm, S, bones, col)
-            _CCL_SIG = None
+                    for i in mirrored | {idx}:
+                        _ccl_place_item(i, caps, arm, S, bones, col)
+            _CCL_SIG = _ccl_preview_signature(col)
         finally:
             _CCL_UI_GUARD = False
     except Exception as e:
@@ -2598,6 +2895,10 @@ class MT_OT_CclCapsuleZero(Operator):
         idx = max(0, min(len(caps) - 1, int(getattr(sc, 'MT_CclIndex', 0) or 0)))
         caps[idx]['start'] = (0.0, 0.0, 0.0)
         caps[idx]['end'] = (0.0, 0.0, 0.0)
+        if sc.MT_CclMirror:
+            col = bpy.data.collections.get('CCL_Preview')
+            _ccl_mirror_edits(sc, caps, {idx: {'start', 'end'}},
+                              *_ccl_edit_bindings(context, caps, col))
         _set_ccl_capsules(sc, caps)
         c = _ccl_panel_from(sc, caps, idx)
         _ccl_auto_refresh(context)
@@ -2787,289 +3088,192 @@ class MT_OT_CclPreviewClear(Operator):
         return {'FINISHED'}
 
 class MT_OT_CclDragSync(Operator):
-    bl_idname = "mt_framework.ccl_drag_sync"
-    bl_label = "拖动同步（端点手柄）"
-    bl_description = ("进入后移动鼠标 = 拖端点手柄，面板偏移量实时更新；"
-                      "滚轮 = 改半径；Tab = 切起点/终点；左键/右键 = 完成；ESC = 取消")
+    bl_idname = 'mt_framework.ccl_drag_sync'
+    bl_label = '拖动胶囊'
+    bl_description = '鼠标移动，滚轮调半径，X/Y/Z 锁轴，Tab 切端点。左键确认，右键或 Esc 撤销'
+    bl_options = {'UNDO'}
+
+    target: EnumProperty(items=[
+        ('AUTO', '自动', '优先调整选中的端点'),
+        ('start', '移动 A', '只移动起点'),
+        ('end', '移动 B', '只移动终点'),
+        ('both', '整体移动', '同时移动两个端点'),
+    ], default='AUTO', options={'HIDDEN'})
 
     def invoke(self, context, event):
         global _CCL_DRAGGING
         if _CCL_DRAGGING:
-            self.report({'WARNING'}, '已经在拖动同步中：左键/右键结束')
+            return {'CANCELLED'}
+        area = context.area
+        if area is None or area.type != 'VIEW_3D':
+            self.report({'ERROR'}, '请在 3D 视图使用')
             return {'CANCELLED'}
         sc = context.scene
         caps = _ccl_caps(sc)
         if not caps:
-            self.report({'ERROR'}, '没有自定义胶囊：先「新增」')
+            self.report({'ERROR'}, '请先新增胶囊')
             return {'CANCELLED'}
-        col = bpy.data.collections.get('CCL_Preview')
-        if col is None:
-            n = _ccl_build_preview(context, quiet=True)
-            col = bpy.data.collections.get('CCL_Preview')
-            if col is None or n <= 0:
-                self.report({'ERROR'}, _CCL_BUILD_NOTE or '示意建不出来：先「生成胶囊示意」')
+        rebuild = bpy.app.timers.is_registered(_ccl_deferred_rebuild)
+        if rebuild:
+            bpy.app.timers.unregister(_ccl_deferred_rebuild)
+        col = sc.collection.children.get('CCL_Preview')
+        if rebuild or col is None or col.get('ccl_space') != _CCL_GAME_SPACE:
+            if _ccl_build_preview(context, quiet=True) <= 0:
+                self.report({'ERROR'}, _CCL_BUILD_NOTE or '无法显示胶囊示意')
                 return {'CANCELLED'}
-        ob = _ccl_drag_target(context, col)
-        if ob is None:
-            self.report({'ERROR'}, 'CCL_Preview 里没有可拖的端点手柄')
+        self._col = sc.collection.children.get('CCL_Preview')
+        self._arm, self._S, self._bones = _ccl_cache_get(self._col)
+        self._idx = min(sc.MT_CclIndex, len(caps)-1)
+        self._role = self.target
+        if self.target == 'AUTO':
+            active = context.view_layer.objects.active
+            if active and active.name in self._col.objects and active.get('ccl_role') in ('start', 'end'):
+                self._idx = int(active['ccl_index'])
+                self._role = active['ccl_role']
+            else:
+                self._role = 'end'
+        if self._arm is None or not 0 <= self._idx < len(caps):
+            self.report({'ERROR'}, '请重新显示胶囊示意')
             return {'CANCELLED'}
-        idx = int(ob.get('ccl_index', 0))
-        self._ob = ob
-        self._idx = idx
-        self._role = str(ob.get('ccl_role', 'end'))
-        self._json0 = str(getattr(sc, 'MT_CclCapsules', '') or '')
-        self._panel0 = (int(sc.MT_CclBoneA), int(sc.MT_CclBoneB), float(sc.MT_CclRadius),
-                        tuple(sc.MT_CclStart), tuple(sc.MT_CclEnd))
-        self._anchor = ob.matrix_world.translation.copy()
-        self._start_pos = self._anchor.copy()
-        self._region = context.region
-        self._rv3d = context.region_data
-        self._area = context.area
-        if self._rv3d is None:
-            self.report({'ERROR'}, '请在 3D 视图里用这个按钮')
+        pts = _ccl_endpoints(caps[self._idx], self._arm, self._S, self._bones)
+        if pts is None:
+            self.report({'ERROR'}, '当前胶囊的端点骨无法解析')
             return {'CANCELLED'}
+        self._area = area
+        self._region = next(r for r in area.regions if r.type == 'WINDOW')
+        self._rv3d = context.region_data or area.spaces.active.region_3d
         from mathutils import Vector
         self._normal = (self._rv3d.view_rotation @ Vector((0.0, 0.0, -1.0))).normalized()
-        mx = getattr(event, 'mouse_region_x', None)
-        my = getattr(event, 'mouse_region_y', None)
-        if mx is None or my is None:
-            mx = int(self._region.width / 2)
-            my = int(self._region.height / 2)
-        self._mouse0 = (int(mx), int(my))
-        p0 = self._mouse_world(int(mx), int(my))
-        self._mouse0_pos = p0 if p0 is not None else self._start_pos.copy()
-        arm, S, bones = _ccl_cache_get(col)
-        self._arm = arm
-        self._S = S
-        self._bones = bones
-        for o in context.selected_objects:
-            try:
-                o.select_set(False)
-            except Exception:
-                pass
-        ob.select_set(True)
-        context.view_layer.objects.active = ob
-        _CCL_DRAGGING = True
         self._axis = None
-        self._hdr = ('拖动同步：移动=拖端点 | X/Y/Z=锁轴 | Shift=精调 | 滚轮=半径 | '
-                     'Tab=起/终点 | 左/右键=完成 | ESC=取消')
-        try:
-            context.area.header_text_set(self._hdr)
-        except Exception:
-            pass
+        self._json0 = sc.MT_CclCapsules
+        self._changed = set()
+        sc.MT_CclNewPending = False
+        _ccl_panel_from(sc, caps, self._idx)
+        _ccl_handle_visibility(sc, context)
+        self._reanchor(event, pts)
+        self._header(sc)
         context.window_manager.modal_handler_add(self)
-        self.report({'INFO'}, '拖动同步：#%d %s | %s'
-                    % (idx, '终点' if self._role == 'end' else '起点', _ccl_diag_text()))
+        _CCL_DRAGGING = True
         return {'RUNNING_MODAL'}
 
-    def _axis_vector(self):
-        from mathutils import Vector
-        if self._axis is None:
+    def _header(self, scene):
+        action = {'start': '移动 A', 'end': '移动 B', 'both': '整体移动'}[self._role]
+        axis = 'XYZ'[self._axis] if self._axis is not None else '自由'
+        self._area.header_text_set(
+            f'胶囊 #{self._idx} {action} | {axis} | 半径 {scene.MT_CclRadius:.1f}'
+            ' | X/Y/Z 锁轴 · Shift 精调 · 滚轮改半径 · Tab 换端点 · 左键确认 / 右键取消')
+
+    def _mouse_world(self, event):
+        from bpy_extras.view3d_utils import region_2d_to_origin_3d, region_2d_to_vector_3d
+        xy = (event.mouse_x - self._region.x, event.mouse_y - self._region.y)
+        origin = region_2d_to_origin_3d(self._region, self._rv3d, xy)
+        direction = region_2d_to_vector_3d(self._region, self._rv3d, xy)
+        denom = direction.dot(self._normal)
+        if abs(denom) < 1e-9:
             return None
-        v = Vector((0.0, 0.0, 0.0))
-        v[self._axis] = 1.0
-        return v
+        return origin + direction * ((self._anchor - origin).dot(self._normal) / denom)
 
-    def _constrain(self, raw, event):
-        from mathutils import Vector
-        d = raw - self._anchor
-        if getattr(event, 'shift', False):
-            d = d * 0.1
-        ax = self._axis_vector()
-        if ax is not None:
-            d = ax * d.dot(ax)
-        return self._anchor + d
+    def _reanchor(self, event, pts):
+        pa, pb = pts
+        self._anchor = pa if self._role == 'start' else pb if self._role == 'end' else (pa + pb) * 0.5
+        self._mouse0 = self._mouse_world(event)
 
-    def _hdr_live(self, context):
-        try:
-            sc = context.scene
-            caps = _ccl_caps(sc)
-            if not (0 <= self._idx < len(caps)):
-                return
-            c = caps[self._idx]
-            ax = '自由' if self._axis is None else 'XYZ'[self._axis]
-            key = 'start' if self._role == 'start' else 'end'
-            off = c[key]
-            tag = '起' if self._role == 'start' else '终'
-            self._hdr = ('拖动同步 #%d %s | 轴:%s | %s偏移(%+.1f,%+.1f,%+.1f) | r%.1f | '
-                         'X/Y/Z=锁轴 Shift=精调 滚轮=半径 Tab=起/终点 左/右键=完成 ESC=取消'
-                         % (self._idx, '起点' if self._role == 'start' else '终点',
-                            ax, tag,
-                            float(off[0]), float(off[1]), float(off[2]),
-                            float(c['radius'])))
-            context.area.header_text_set(self._hdr)
-        except Exception:
-            pass
+    def _commit(self, scene, caps, fields):
+        global _CCL_SIG
+        indices = {self._idx} | _ccl_mirror_edits(
+            scene, caps, {self._idx: fields}, self._arm, self._S, self._bones)
+        self._changed.update(indices)
+        _set_ccl_capsules(scene, caps)
+        _ccl_panel_from(scene, caps, self._idx)
+        for idx in indices:
+            _ccl_place_item(idx, caps, self._arm, self._S, self._bones, self._col)
+        _CCL_SIG = _ccl_preview_signature(self._col)
 
-    def _mouse_world(self, mx, my):
-        try:
-            from bpy_extras.view3d_utils import (region_2d_to_origin_3d,
-                                                 region_2d_to_vector_3d)
-            origin = region_2d_to_origin_3d(self._region, self._rv3d, (mx, my))
-            direction = region_2d_to_vector_3d(self._region, self._rv3d, (mx, my))
-            denom = direction.dot(self._normal)
-            if abs(denom) < 1e-9:
-                return None
-            t = (self._anchor - origin).dot(self._normal) / denom
-            return origin + direction * t
-        except Exception as e:
-            _ccl_note('鼠标投影失败: %r' % (e,))
-            return None
-
-    def _apply_position(self, context, pos):
-        sc = context.scene
-        self._ob.matrix_world.translation = pos
-        caps = _ccl_caps(sc)
-        if not (0 <= self._idx < len(caps)):
-            return 0
-        info = self._bones.get(int(self._ob.get('ccl_bone_id', 0)))
-        if info is None or self._arm is None:
-            return 0
-        bone = self._arm.data.bones.get(info[0])
-        if bone is None:
-            return 0
-        off = _ccl_offset(self._arm, bone, info[1], self._S, pos)
-        c = caps[self._idx]
-        key = 'start' if self._role == 'start' else 'end'
-        old = c.get(key, (0.0, 0.0, 0.0))
-        if max(abs(off[i] - float(old[i])) for i in range(3)) <= 1e-6:
-            return 0
-        c[key] = tuple(float(v) for v in off)
-        _set_ccl_capsules(sc, caps)
-        _ccl_panel_from(sc, caps, self._idx)
-        try:
-            _ccl_refresh_item(self._idx, caps, self._arm, self._S, self._bones)
-        except Exception:
-            pass
-        _CCL_STAT['seen'] += 1
-        _CCL_STAT['chg'] += 1
-        return 1
-
-    def _apply_radius(self, context, factor):
-        sc = context.scene
-        caps = _ccl_caps(sc)
-        if not (0 <= self._idx < len(caps)):
-            return 0
-        c = caps[self._idx]
-        r = max(0.1, min(10000.0, float(c['radius']) * factor))
-        if abs(r - float(c['radius'])) < 1e-6:
-            return 0
-        c['radius'] = r
-        _set_ccl_capsules(sc, caps)
-        _ccl_panel_from(sc, caps, self._idx)
-
-        try:
-            _ccl_refresh_item(self._idx, caps, self._arm, self._S, self._bones)
-        except Exception:
-            pass
-        return 1
-
-    def _switch_role(self, context):
-        col = bpy.data.collections.get('CCL_Preview')
-        if col is None:
+    def _apply_position(self, scene, event):
+        pos = self._mouse_world(event)
+        if pos is None or self._mouse0 is None:
             return
-        want = 'start' if self._role == 'end' else 'end'
-        for ob in col.objects:
-            if ob.get('ccl_role') == want and int(ob.get('ccl_index', -1)) == self._idx:
-                self._ob = ob
-                self._role = want
-                self._anchor = ob.matrix_world.translation.copy()
-                self._start_pos = self._anchor.copy()
-                for o in context.selected_objects:
-                    try:
-                        o.select_set(False)
-                    except Exception:
-                        pass
-                ob.select_set(True)
-                context.view_layer.objects.active = ob
-                _CCL_STAT['seen'] += 1
-                return
+        delta = pos - self._mouse0
+        if event.shift:
+            delta *= 0.1
+        if self._axis is not None:
+            for i in range(3):
+                if i != self._axis:
+                    delta[i] = 0.0
+        pos = self._anchor + delta
+        caps = _ccl_caps(scene)
+        cap = caps[self._idx]
+        pa, pb = _ccl_endpoints(cap, self._arm, self._S, self._bones)
+        if self._role == 'both':
+            move = pos - (pa + pb) * 0.5
+            edits = (('start', 'a', pa + move), ('end', 'b', pb + move))
+        else:
+            edits = ((self._role, 'a' if self._role == 'start' else 'b', pos),)
+        fields = set()
+        for field, binding, point in edits:
+            name, rotation = self._bones[int(cap[binding])]
+            bone = self._arm.data.bones[name]
+            off = _ccl_offset(self._arm, bone, rotation, self._S, point)
+            if max(abs(a - b) for a, b in zip(off, cap[field])) > 1e-5:
+                cap[field] = tuple(off)
+                fields.add(field)
+        if fields:
+            self._commit(scene, caps, fields)
+
+    def _apply_radius(self, scene, factor):
+        caps = _ccl_caps(scene)
+        cap = caps[self._idx]
+        r = max(0.1, min(10000.0, cap['radius'] * factor))
+        if r != cap['radius']:
+            cap['radius'] = r
+            self._commit(scene, caps, {'radius'})
 
     def _finish(self, context, keep):
-        global _CCL_DRAGGING
-        _CCL_DRAGGING = False
+        global _CCL_DRAGGING, _CCL_SIG
         try:
-            context.area.header_text_set(None)
-        except Exception:
-            pass
-        if not keep:
-            sc = context.scene
-            try:
+            if not keep and self._changed:
+                sc = context.scene
                 sc.MT_CclCapsules = self._json0
-                _CCL_CAPS_CACHE['text'] = None
                 caps = _ccl_caps(sc)
                 _ccl_panel_from(sc, caps, self._idx)
-                _ccl_build_preview(context, quiet=True)
-            except Exception as e:
-                _ccl_note('取消拖动还原失败: %r' % (e,))
-        else:
-            try:
-                _ccl_sync_from_preview(context.scene, force=True)
-            except Exception as e:
-                _ccl_note('收尾同步失败: %r' % (e,))
-        try:
+                for idx in self._changed:
+                    _ccl_place_item(idx, caps, self._arm, self._S, self._bones, self._col)
+                _CCL_SIG = _ccl_preview_signature(self._col)
+        finally:
+            _CCL_DRAGGING = False
+            self._area.header_text_set(None)
             self._area.tag_redraw()
-        except Exception:
-            pass
 
     def modal(self, context, event):
+        sc = context.scene
         try:
-            et = event.type
-            if et == 'MOUSEMOVE' and event.value in ('MOVE', 'PRESS'):
-                pos = self._mouse_world(event.mouse_region_x, event.mouse_region_y)
-                if pos is not None:
-                    self._apply_position(context, self._constrain(pos, event))
-                self._hdr_live(context)
-                if self._area is not None:
-                    self._area.tag_redraw()
-                return {'RUNNING_MODAL'}
-            if et in ('LEFTMOUSE', 'RIGHTMOUSE') and event.value == 'PRESS':
-                self._finish(context, True)
-                return {'FINISHED'}
-            if et == 'ESC' and event.value == 'PRESS':
-                self._finish(context, False)
-                return {'CANCELLED'}
-            if et == 'WHEELUPMOUSE' or et == 'WHEELDOWNMOUSE':
-                self._apply_radius(context, 1.05 if et == 'WHEELUPMOUSE' else (1.0 / 1.05))
-                self._hdr_live(context)
-                if self._area is not None:
-                    self._area.tag_redraw()
-                return {'RUNNING_MODAL'}
-            if et == 'TAB' and event.value == 'PRESS':
-                self._switch_role(context)
-                self._hdr_live(context)
-                return {'RUNNING_MODAL'}
-
-            if et in ('X', 'Y', 'Z') and event.value == 'PRESS':
-                ax = {'X': 0, 'Y': 1, 'Z': 2}[et]
-                self._axis = None if self._axis == ax else ax
-                self._hdr_live(context)
-                return {'RUNNING_MODAL'}
+            key = event.type
+            if key == 'MOUSEMOVE':
+                self._apply_position(sc, event)
+            elif key in ('WHEELUPMOUSE', 'WHEELDOWNMOUSE'):
+                self._apply_radius(sc, 1.05 if key == 'WHEELUPMOUSE' else 1.0 / 1.05)
+            elif event.value == 'PRESS':
+                if key in ('LEFTMOUSE', 'RET', 'NUMPAD_ENTER'):
+                    self._finish(context, True)
+                    return {'FINISHED'}
+                if key in ('RIGHTMOUSE', 'ESC'):
+                    self._finish(context, False)
+                    return {'CANCELLED'}
+                if key == 'TAB':
+                    self._role = 'end' if self._role == 'start' else 'start'
+                    cap = _ccl_caps(sc)[self._idx]
+                    self._reanchor(event, _ccl_endpoints(cap, self._arm, self._S, self._bones))
+                elif key in ('X', 'Y', 'Z'):
+                    axis = 'XYZ'.index(key)
+                    self._axis = None if axis == self._axis else axis
+            self._header(sc)
+            self._area.tag_redraw()
             return {'RUNNING_MODAL'}
-        except Exception as e:
-            _ccl_note('拖动同步出错: %r' % (e,))
-            import traceback
-            traceback.print_exc()
-            self._finish(context, True)
+        except Exception as exc:
+            _ccl_note('拖动胶囊失败: %r' % (exc,))
+            self._finish(context, False)
+            self.report({'ERROR'}, str(exc))
             return {'CANCELLED'}
-
-def _ccl_drag_target(context, col):
-    for ob in context.selected_objects:
-        if ob.get('ccl_role') in ('start', 'end'):
-            try:
-                if ob.name in col.objects:
-                    return ob
-            except Exception:
-                pass
-    idx = int(getattr(context.scene, 'MT_CclIndex', 0) or 0)
-    for want in ('end', 'start'):
-        for ob in col.objects:
-            if ob.get('ccl_role') == want and int(ob.get('ccl_index', -1)) == idx:
-                return ob
-    for ob in col.objects:
-        if ob.get('ccl_role') in ('start', 'end'):
-            return ob
-    return None
 
 class MT_OT_CclCapsuleImport(Operator):
     bl_idname = "mt_framework.ccl_capsule_import"
@@ -3110,7 +3314,7 @@ class MT_OT_CclCapsuleCheck(Operator):
         sc = context.scene
         caps = _ccl_caps(sc)
         if not caps:
-            _CCL_CHECK_TEXT = '没有自定义胶囊（导出会用自动 11 个身体胶囊）'
+            _CCL_CHECK_TEXT = '没有自定义胶囊'
             self.report({'INFO'}, _CCL_CHECK_TEXT)
             return {'FINISHED'}
         try:
@@ -3118,9 +3322,30 @@ class MT_OT_CclCapsuleCheck(Operator):
             warns, summary = capsule_warnings(caps)
         except Exception as e:
             warns, summary = ['体检模块出错：%r' % (e,)], ''
-        lens = [max(abs(float(c['end'][k]) - float(c['start'][k])) for k in range(3))
-                for c in caps]
-        note = '%s | 端点距离 %.1f~%.1f' % (summary, min(lens), max(lens))
+        try:
+            from .MTframework_MHGU_ccl import _CclClearance
+            mod, ctc, positions = _ccl_clearance_state(context)
+            geometry = _CclClearance(mod, ctc, 0.75, positions)
+            if not geometry.ids:
+                raise ValueError('CTC 没有带碰撞形状和正半径的节点')
+            selected = min(sc.MT_CclIndex, len(caps) - 1)
+            cap = caps[selected]
+            gaps = geometry.gaps(*geometry.p_q(cap))
+            nearest = int(gaps.argmin())
+            bone_radius = geometry.radii[nearest]
+            summary = (f'#{selected} CCL 半径 {cap["radius"]:.2f} + 物理骨半径 {bone_radius:.2f}'
+                       f' = 接触距离 {cap["radius"] + bone_radius:.2f}')
+            for i, cap in enumerate(caps):
+                gaps = geometry.gaps(*geometry.p_q(cap))
+                limit = float(gaps.min()) - geometry.margin
+                hits = int((gaps < cap['radius'] - 1e-4).sum())
+                if cap.get('enabled', True) and cap['radius'] > limit + 0.001:
+                    nearest_id = geometry.ids[int(gaps.argmin())]
+                    warns.append(f'胶囊 #{i} 压到 {hits} 个节点，最近骨 ID {nearest_id}，'
+                                 f'留间隙的半径 ≤ {max(0, limit):.2f}')
+        except ValueError as exc:
+            warns.append('未检查物理骨间隙：' + str(exc))
+        note = summary
         if warns:
             _CCL_CHECK_TEXT = '%s | %d 条警告' % (note, len(warns))
             self.report({'WARNING'}, note + '\n' + '\n'.join(warns[:6]))
@@ -3199,6 +3424,8 @@ classes = [
     MT_OT_Diagnostic,
     MT_OT_PartTransplant,
     MT_OT_WeightsNormalize,
+    MT_OT_CclCapsuleSelect,
+    MT_MT_CclCapsuleSelect,
     MT_OT_CclCapsuleStep,
     MT_OT_CclReadBone,
     MT_OT_CclDragSync,
@@ -3213,6 +3440,7 @@ classes = [
     MT_OT_CclFromPreview,
     MT_OT_CclPreviewClear,
     MT_OT_CclCapsuleAdd,
+    MT_OT_CclFitBody,
     MT_OT_CclCapsuleClear,
     MT_OT_CclCapsuleDel,
     MT_PT_MainPanel,
@@ -3226,10 +3454,19 @@ def register():
     bpy.types.Scene.MT_PhysIter = IntProperty(
         name="CTC 解算迭代", default=1, min=1, max=3,
         description="写进 CTC 头 +52/+53；长/弯发束用 3 可减少被限位拉长")
+    bpy.types.Scene.MT_PhysFuseOverflow = BoolProperty(
+        name='超限时对半融并', default=False,
+        description='只在骨位不够时对未登记的并列整组骨链一起做相邻融并')
+    bpy.types.Scene.MT_PhysFuseLimit = IntProperty(
+        name='总骨数预算', default=255, min=19, max=255,
+        description='包括身体骨、已登记物理骨和需要补的链尾')
     bpy.types.Scene.MT_CclEnable = BoolProperty(
         name="碰撞胶囊 CCL", default=False,
         description="导出 helm/hair 槽时写入 11 个身体胶囊，并把 CTC 组标志位打开 0x04"
                     "（头发/身体避让用；body 槽无效）")
+    bpy.types.Scene.MT_CclProtect = BoolProperty(
+        name='导出时避开静止物理链', default=True,
+        description='按最终 MOD 和 CTC 调整存在挤压的胶囊，成功导出后同步当前工程与示意')
     bpy.types.Scene.MT_TransplantKeepCtc = BoolProperty(
         name="保留物理 CTC", default=True)
     bpy.types.Scene.MT_TransplantSet = StringProperty(
@@ -3260,9 +3497,17 @@ def register():
     bpy.types.Scene.MT_CclAutoPreview = BoolProperty(
         name="自动更新示意", default=True,
         description="新增/修改/删除胶囊后，自动重建 CCL_Preview 视口示意")
+    bpy.types.Scene.MT_CclMirror = BoolProperty(
+        name='左右镜像联动', default=False,
+        description='编辑端点或半径时，联动具有唯一配对的另一侧胶囊。使用骨架静止姿态的中线')
+    bpy.types.Scene.MT_CclShowAllHandles = BoolProperty(
+        name='显示全部端点', default=False,
+        description='关闭时只显示当前胶囊的 A/B 手柄',
+        update=_ccl_handle_visibility)
+    bpy.types.Scene.MT_CclMore = BoolProperty(name='CCL 更多选项', default=False)
     bpy.types.Scene.MT_CclBodyPick = BoolProperty(
         name="可选胶囊本体", default=False,
-        description="关闭时胶囊体只显示不参与选择，A/B 圆环手柄可直接拖动；"
+        description="关闭时胶囊体只显示不参与选择，A/B 球形手柄可直接拖动；"
                     "打开后才能整体移动/缩放胶囊",
         update=_ccl_bodypick_update)
     bpy.types.Scene.MT_CclNewPending = BoolProperty(
@@ -3301,7 +3546,10 @@ def unregister():
     _ccl_unmount_handler()
     for _k in ('MT_TransplantKeepCtc', 'MT_TransplantSet',
                'MT_TransplantOutDir', 'MT_TransplantGender',
-               'MT_CclRadius', 'MT_CclCapsules',
+               'MT_CclRadius', 'MT_CclCapsules', 'MT_CclMirror', 'MT_CclShowAllHandles', 'MT_CclMore',
+               'MT_CclEnable', 'MT_CclProtect', 'MT_CclAutoSync', 'MT_CclAutoPreview', 'MT_CclBodyPick',
+               'MT_CclNewPending', 'MT_CclIndex', 'MT_CclBoneA', 'MT_CclBoneB', 'MT_CclStart', 'MT_CclEnd',
+               'MT_PhysFuseOverflow', 'MT_PhysFuseLimit',
                'MT_PhysSegment', 'MT_SkipHidden'):
         try:
             delattr(bpy.types.Scene, _k)
