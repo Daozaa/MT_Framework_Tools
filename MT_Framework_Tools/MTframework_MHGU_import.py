@@ -1817,6 +1817,18 @@ def import_mod_file(filepath, game_fix="mhgu", sidecar_source=None):
         except Exception as _e:
             print("对称命名跳过:", _e)
 
+    if Armature is not None and (mod_ver & 0xFFFF) == 0xD4:
+
+        record_names = get_armature_bone_name_map(Armature)
+        if not record_names:
+            record_names = {bone_name_for(i + 1): i for i in range(len(BoneArray))}
+            Armature[SYM_NAME_MAP_KEY] = record_names
+            bpy.context.scene[SYM_NAME_MAP_KEY] = record_names
+        physical = {str(BoneArray[slot].ID): name for name, slot in record_names.items()
+                    if BoneArray[slot].ID >= 20}
+        if physical:
+            Armature['MT_PhysIdMap'] = physical
+
     try:
         _mode = bpy.context.scene.MT_Framework_Props.auto_center
     except Exception:

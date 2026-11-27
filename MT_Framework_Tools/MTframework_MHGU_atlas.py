@@ -27,6 +27,23 @@ def _source(socket):
         socket = link.from_node.inputs[0]
     return None
 
+def _solid_mmd_texture(tree, material, shader, color):
+    diffuse = shader.inputs.get('Diffuse Color')
+    if (shader.type != 'GROUP' or color.name != 'Base Tex' or diffuse is None
+            or diffuse.is_linked or shader.inputs.get('Base Alpha') is None):
+        return None
+    rgb = np.clip(np.asarray(diffuse.default_value[:3]), 0.0, 1.0)
+    srgb = np.where(rgb <= 0.0031308, rgb * 12.92, 1.055 * rgb ** (1.0 / 2.4) - 0.055)
+    pixel = np.rint(np.append(srgb, 1.0) * 255).astype(np.uint8).reshape(1, 1, 4)
+    image = rgba_to_image(pixel, material.name + ' · 基础色', 'sRGB')
+    node = tree.nodes.new('ShaderNodeTexImage')
+    node.image = image
+    node.interpolation = 'Closest'
+    node.extension = 'EXTEND'
+    node.location = (shader.location.x - 260, shader.location.y)
+    tree.links.new(node.outputs['Color'], color)
+    return node.outputs['Color']
+
 def _texture(material):
     if material is None or not material.use_nodes:
         raise ValueError('面没有使用节点材质')
@@ -49,6 +66,8 @@ def _texture(material):
                 pending.extend(s for s in node.inputs if s.type == 'SHADER')
                 continue
             tex = _source(color)
+            if tex is None:
+                tex = _solid_mmd_texture(tree, material, node, color)
             if tex is None or tex.node.type != 'TEX_IMAGE' or tex.name != 'Color':
                 raise ValueError(f'「{material.name}」需要直接连接基础色图片')
             textures.add(tex.node)
@@ -118,7 +137,10 @@ def _measure(objects):
                 offsets = np.floor(np.minimum.reduceat(uv, starts, axis=0) + 1e-6)
                 uv -= np.repeat(offsets, counts[slots == slot], axis=0)
                 low, high = uv.min(axis=0), uv.max(axis=0)
-            key = (node.image, node.extension)
+            opacity = float(material.get('MT_AtlasOpacity', 1.0))
+            if not 0.0 <= opacity <= 1.0:
+                raise ValueError(f'「{material.name}」的不透明度超出 0–1')
+            key = (node.image, node.extension, opacity)
             lo, hi = tuple(low), tuple(high)
             if np.any(np.abs(uv) > 32768) or any(b - a > 16 for a, b in zip(lo, hi)):
                 raise ValueError(f'「{material.name}」UV 跨过的贴图格数过多')
@@ -165,10 +187,12 @@ def _compose(side, placed):
     atlas = np.zeros((side, side, 4), dtype=np.uint8)
 
     for key, (x, y, w, h, (tw, th), start) in placed.items():
-        img, extension = key
+        img, extension, opacity = key
         rgba = image_to_rgba(img)
         if img.alpha_mode == 'NONE':
             rgba[:, :, 3] = 255
+        if opacity != 1.0:
+            rgba[:, :, 3] = np.rint(rgba[:, :, 3] * opacity).astype(np.uint8)
         tile = resize_rgba(rgba, tw, th)[::-1]
         ix = np.arange(w) - PADDING + start[0]
         iy = np.arange(h) - PADDING + start[1]
@@ -247,7 +271,7 @@ def make_atlas(objects, limit):
         if not image.users:
             bpy.data.images.remove(image)
         raise
-    return image, len({img for img, _ in bounds}), scale
+    return image, len({key[0] for key in bounds}), scale
 
 class MT_OT_MakeAtlas(Operator):
     bl_idname = 'mt_framework.make_atlas'

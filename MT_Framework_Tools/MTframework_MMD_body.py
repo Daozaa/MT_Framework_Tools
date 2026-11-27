@@ -284,7 +284,7 @@ def restore_root_tail(context, mt, path):
     _edit_arm(context, mt, fit)
 
 def bind_body(context, mt, mmd, meshes, pelvis_name='', swap_lr=False):
-    from .MTframework_MMD_rig import MMD_BONE_MAP, MMD_BONE_SOURCE
+    from .MTframework_MMD_rig import mmd_weight_targets
 
     source = mmd_body_bones(mmd, pelvis_name, swap_lr)
     target = mt_body_bones(mt)
@@ -296,13 +296,20 @@ def bind_body(context, mt, mmd, meshes, pelvis_name='', swap_lr=False):
     linked = _linked_meshes(context, mmd)
     if not meshes or any(o not in linked or o.data.users != 1 or o.library for o in meshes):
         raise ValueError('请选择绑定在这副 MMD 骨架上的本地单用户网格')
-    source_weights = _weight_slots(mmd, source, swap_lr)
-    remap = {name: target[slot].name for name, slot in source_weights.items()
-             if slot in target}
-    if mt.get(MMD_BONE_SOURCE) in (None, mmd):
-        remap.update({src: dest for src, dest in dict(mt.get(MMD_BONE_MAP, {})).items()
-                      if dest in mt.data.bones})
-    slot_by_name = {bone.name: slot for slot, bone in target.items()}
+    remap = mmd_weight_targets(mt, mmd, source, target, swap_lr)
+    source_bones = set(mmd.data.bones.keys())
+    unknown = {}
+    for obj in meshes:
+        unresolved = {g.index: g.name for g in obj.vertex_groups
+                      if g.name in source_bones and g.name not in remap}
+        if unresolved:
+            used = {unresolved[g.group] for v in obj.data.vertices for g in v.groups
+                    if g.group in unresolved and g.weight > 0}
+            if used:
+                unknown[obj.name] = sorted(used)
+    if unknown:
+        detail = '; '.join(f'{obj}: {", ".join(names[:8])}' for obj, names in unknown.items())
+        raise ValueError('这些带权重的 MMD 骨没有对应目标，请先迁移或指定身体映射：' + detail)
     fallback = 0
     from .MTframework_MHGU import CENTER_OFFSET_OBJ_KEY
     for obj in meshes:
@@ -314,8 +321,7 @@ def bind_body(context, mt, mmd, meshes, pelvis_name='', swap_lr=False):
                 name = by_index[g.group]
                 if name is not None and g.weight > 0:
                     sums[name] = sums.get(name, 0) + g.weight
-            influences = sorted(sums.items(),
-                                key=lambda item: (-item[1], slot_by_name.get(item[0], 256), item[0]))[:4]
+            influences = list(sums.items())
             if not influences:
                 fallback += 1
                 influences = [(target[1].name, 1.0)]

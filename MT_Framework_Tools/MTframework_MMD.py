@@ -978,8 +978,8 @@ class MT_OT_MMDGrip(Operator):
 
 class MT_OT_MMDMigrateBones(Operator):
     bl_idname = 'mt_framework.mmd_migrate_bones'
-    bl_label = '迁移带权重的子骨'
-    bl_description = '把选中网格使用的非身体子骨和父子链复制到 MT，可再登记为物理骨'
+    bl_label = '自动整理并迁移物理骨'
+    bl_description = '面部骨归头骨，明确的辅助骨归有效父骨，其他加权子骨迁移到 MT'
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -992,11 +992,11 @@ class MT_OT_MMDMigrateBones(Operator):
         props = context.scene.MT_Framework_MMD_Props
         try:
             mt, mmd = body_armatures(context)
-            count = migrate_bones(context, mt, mmd, props.pelvis_bone, props.swap_lr)
+            count, folded = migrate_bones(context, mt, mmd, props.pelvis_bone, props.swap_lr)
         except (ValueError, RuntimeError) as exc:
             self.report({'ERROR'}, str(exc))
             return {'CANCELLED'}
-        self.report({'INFO'}, '已迁移 %d 根 MMD 子骨' % count)
+        self.report({'INFO'}, f'已迁移 {count} 根物理候选骨，{folded} 根带权重辅助或面部骨归入有效父骨')
         return {'FINISHED'}
 
 class MT_PT_MMDPanel(Panel):

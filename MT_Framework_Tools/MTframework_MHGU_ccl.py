@@ -165,7 +165,7 @@ def body_capsules(mod_bytes, height=None, positions=None):
     if positions:
         pos.update({bid: np.asarray(point, dtype=float) for bid, point in positions.items()})
     mats = {bid: m for bid, m in worlds}
-    if not pos:
+    if not {1, 2, 14, 17}.issubset(pos):
         return []
 
     if height is None:
@@ -189,8 +189,15 @@ def body_capsules(mod_bytes, height=None, positions=None):
                 p(4, 2) + np.array([0.0, 3.1 * s, -s]), 6 * s))
     for a, b in ((6, 7), (10, 11), (7, 8), (11, 12)):
         raw.append((a, b, p(a, 0), p(b, 0), 4.2 * s))
-    raw.append((0, 0, hip + np.array([0.0, -7 * s, -s]),
-                hip + np.array([0.0, -18 * s, -s]), 10 * s))
+
+    thigh_a, thigh_b = p(14), p(17)
+    sockets = (thigh_a + thigh_b) * 0.5
+    up = p(2) - sockets
+    up /= max(float(np.linalg.norm(up)), 1e-6)
+    width = thigh_b - thigh_a
+    center = sockets + up * max(4.5 * s, float(np.dot(hip - sockets, up)))
+    half_axis = width * 0.40
+    raw.append((1, 1, center - half_axis, center + half_axis, 8.0 * s))
     for a, b, r in ((14, 15, 6.0), (17, 18, 6.0), (15, 16, 4.0), (18, 19, 4.0)):
         raw.append((a, b, p(a, 0), p(b, 0), r * s))
 

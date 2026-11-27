@@ -290,11 +290,19 @@ def _apply(operator, context, filepath):
     from .MTframework_MHGU_import import import_mod_file
     props = context.scene.MT_Framework_Props
     import_mod_file(filepath, props.game_fix, sidecar_source=sidecar_source)
+    context.scene['MT_CtcCustom'] = False
     return True
 
 def _phys_armature(context):
     import re as _re
     arms = [o for o in context.scene.objects if o.type == 'ARMATURE']
+    driving = {o.find_armature() for o in context.selected_objects if o.type == 'MESH'}
+    if context.object and context.object in arms and context.object.get('MT_BoneNameMap'):
+        return context.object
+    candidates = [o for o in arms if o in driving and
+                  (o.get('MT_PhysIdMap') or o.get('MT_BoneNameMap') or o.name.startswith('MT_Armature'))]
+    if len(candidates) == 1:
+        return candidates[0]
     best, best_n = None, 0
     for o in arms:
         n = 0
@@ -332,6 +340,37 @@ def _ensure_template(operator, context):
             mod = f.read()
         if mod[:4] != b'MOD\x00':
             return
+        arc_path, ctc = recalled_arc(context)
+        if ctc and arm.get('MT_PhysIdMap'):
+            from .MTframework_MHGU_physbridge import REMAPPED_SLOTS, sync_registered_edits
+            from .MTframework_MHGU_tpl import _project_template_path, store
+            synced = sync_registered_edits(context, arm, mod, ctc)
+            if synced is not None:
+                new_mod, ctc, names, ids, removed, restored = synced
+                path = _project_template_path(context, new_mod, '_physics_edit')
+                if not os.path.exists(path):
+                    with open(path, 'wb') as stream:
+                        stream.write(new_mod)
+                if not store(context, path):
+                    raise ValueError('无法保存物理骨融并后的工程模板')
+                sc = context.scene
+                sc['MT_LastImportPath'] = path
+                sc['MT_BoneNameMap'] = names
+                sc['MT_CtcCustom'] = True
+                arm['MT_BoneNameMap'] = names
+                arm['MT_PhysIdMap'] = ids
+                arm[REMAPPED_SLOTS] = True
+                migration = arm.get('MT_MmdBoneMap')
+                if migration is not None:
+                    arm['MT_MmdBoneMap'] = {k: v for k, v in migration.items() if v in names}
+                tips = arm.get('MT_AutoTipBones')
+                if tips is not None:
+                    arm['MT_AutoTipBones'] = [name for name in tips if name in names]
+                remember_arc(context, arc_path, ctc)
+                operator.report({'INFO'}, f'物理链已同步，清除 {removed} 个旧骨位，恢复 {restored} 个缺失骨位，保留有效物理参数')
+                return True
+
+            return True
         n_tpl = struct.unpack_from('<H', mod, 6)[0]
         tpl_ptr = struct.unpack_from('<I', mod, 0x24)[0]
         tpl_phys = [mod[tpl_ptr + i * 24] for i in range(n_tpl)]
@@ -378,7 +417,8 @@ def _ensure_template(operator, context):
                         % (n_tpl, len(tpl_phys), len(arm_phys),
                            struct.unpack_from('<H', new_mod, 6)[0], renamed))
     except Exception as e:
-        operator.report({'WARNING'}, '模板自动重建失败：%s（导出可能不完整）' % e)
+        operator.report({'ERROR'}, '物理模板同步失败：%s' % e)
+        return False
 
 def _export(operator, context, filepath, *, expect_atlas_uv=False):
 
@@ -393,7 +433,8 @@ def _export(operator, context, filepath, *, expect_atlas_uv=False):
         _tpl_sync(context)
     except Exception:
         pass
-    _ensure_template(operator, context)
+    if _ensure_template(operator, context) is False:
+        return None
     from .MTframework_MHGU_export import export_mod_file
     props = context.scene.MT_Framework_Props
     out = export_mod_file(filepath, props.game_fix, expect_atlas_uv=expect_atlas_uv,

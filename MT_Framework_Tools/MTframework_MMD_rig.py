@@ -244,6 +244,100 @@ def bake_grip(context, mmd, strength, wrist_lift, thumb_lower):
     mmd["MT_GripBaked"] = True
     return vertices
 
+MMD_FACE_OVERRIDES = "MT_MmdFaceOverrides"
+MMD_FOLD_OVERRIDES = "MT_MmdFoldOverrides"
+
+_FACE_PARTS = frozenset(
+    "eye eyes eyeball eyelid lid eyelash eyelashes brow eyebrow iris pupil mouth "
+    "jaw mandible lip lips tongue tooth teeth cheek nose nostril face facial irissd".split()
+)
+_FACE_LABELS = frozenset(
+    "l r c left right both upper lower top bottom in out inner outer front back "
+    "head j bip adj bone root ctrl control rig end tip corner lim ik parent dummy shadow "
+    "joint rt lf md ot up dn line a b".split()
+)
+_FACE_CJK = re.compile(
+    r"(?:左右|左|右|両|双|雙|上|下|内|內|外|前|後|后|中|額|眉|面|顔|颜|脸|臉|控制|表情)*"
+    r"(?:目|目玉|眼|眼球|眼睛|眼皮|眼睑|眼瞼|睑|瞼|まぶた|瞳|瞳孔|虹彩|虹膜|眼角|目光|"
+    r"眉|眉毛|まゆ|睫毛|まつげ|口|嘴|嘴角|嘴唇|唇|舌|舌头|舌頭|歯|牙齿|牙齒|"
+    r"顎|颚|颌|顎骨|下巴|頬|颊|鼻|鼻子|鼻孔)"
+    r"(?:先|親|戻|端|骨|控制|关节|上|下|内|內|外|中)*"
+)
+
+def face_bone_name(name):
+    name = unicodedata.normalize("NFKC", name)
+    name = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name).casefold()
+    words = set(re.findall(r"[a-z]+", name))
+    cjk = "".join(re.findall(r"[ぁ-ヿ一-龯]+", name))
+    if words - (_FACE_PARTS | _FACE_LABELS):
+        return False
+    return bool(_FACE_CJK.fullmatch(cjk) if cjk else words & _FACE_PARTS)
+
+def mmd_bone_folds(mmd, body, explicit=(), overrides=None):
+    fixed = {bone.name for bone in body.values()}
+    explicit = set(explicit.keys() if hasattr(explicit, "keys") else explicit)
+    invalid = (explicit - set(mmd.data.bones.keys())) | (explicit & fixed)
+    if invalid:
+        raise ValueError("无效的面部源骨名：" + "、".join(sorted(invalid)))
+    head = body.get(11)
+    if explicit and head is None:
+        raise ValueError("请确认 MMD 头骨后再指定面部骨")
+    if explicit and any(bone.name in explicit for bone in head.parent_recursive):
+        raise ValueError("头骨的父级不能作为面部骨归并")
+    face, auxiliary = set(explicit), set()
+    for pb in mmd.pose.bones:
+        if pb.name in fixed or pb.parent is None:
+            continue
+        meta = getattr(pb, "mmd_bone", None)
+        names = (pb.name, getattr(meta, "name_j", ""), getattr(meta, "name_e", ""))
+        if head is not None and head in pb.bone.parent_recursive and any(map(face_bone_name, names)):
+            face.add(pb.name)
+        name = unicodedata.normalize("NFKC", pb.name)
+        name = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name).casefold()
+        if (not pb.bone.use_deform or getattr(pb, "is_mmd_shadow_bone", False)
+                or name.startswith(("_dummy_", "_shadow_"))
+                or re.search(r"(?<![a-z])ik(?![a-z])", name)):
+            auxiliary.add(pb.name)
+
+    folds = {name: head.name for name in face}
+    for name in auxiliary - face:
+        parent = mmd.data.bones[name].parent
+        while parent and parent.name in auxiliary and parent.name not in face:
+            parent = parent.parent
+        if parent is not None:
+            folds[name] = folds.get(parent.name, parent.name)
+    overrides = dict((overrides or {}).items())
+    for name, target in overrides.items():
+        if (name in fixed or name not in mmd.data.bones or target not in mmd.data.bones
+                or name == target or mmd.data.bones[name] in mmd.data.bones[target].parent_recursive):
+            raise ValueError(f"无效的骨骼归并：{name} → {target}")
+    folds.update(overrides)
+    for name in folds:
+        target = folds[name]
+        seen = {name}
+        while target in folds:
+            if target in seen:
+                raise ValueError(f"骨骼归并计划存在循环：{name}")
+            seen.add(target)
+            target = folds[target]
+        folds[name] = target
+    return folds
+
+def mmd_weight_targets(mt, mmd, source, target, swap_lr):
+    slots = _weight_slots(mmd, source, swap_lr)
+    resolved = {name: target[slot].name for name, slot in slots.items() if slot in target}
+    previous = mt.get(MMD_BONE_SOURCE)
+    if previous not in (None, mmd):
+        return resolved
+    resolved.update({src: dest for src, dest in dict(mt.get(MMD_BONE_MAP, {})).items()
+                     if dest in mt.data.bones})
+    folds = mmd_bone_folds(mmd, source, mt.get(MMD_FACE_OVERRIDES, ()),
+                           mt.get(MMD_FOLD_OVERRIDES))
+    for name, parent in folds.items():
+        if parent in resolved:
+            resolved[name] = resolved[parent]
+    return resolved
+
 def migrate_bones(context, mt, mmd, pelvis_name, swap_lr):
     if mt.library or mt.data.library or mt.data.users != 1:
         raise ValueError("MT 骨架须为本地单用户")
@@ -263,8 +357,14 @@ def migrate_bones(context, mt, mmd, pelvis_name, swap_lr):
             slot = body_slots.get(bone.name)
             if slot in target:
                 body_names[bone.name] = target[slot].name
+    folds = mmd_bone_folds(mmd, source, mt.get(MMD_FACE_OVERRIDES, ()),
+                           mt.get(MMD_FOLD_OVERRIDES))
     mapped = {src: dest for src, dest in dict(mt.get(MMD_BONE_MAP, {})).items()
-              if dest in mt.data.bones}
+              if dest in mt.data.bones and src not in folds}
+
+    def parent_name(bone):
+        parent = bone.parent
+        return folds.get(parent.name, parent.name) if parent else None
     meshes = _linked_meshes(context, mmd)
     selected = [obj for obj in meshes if obj.select_get()]
     weighted = set()
@@ -274,19 +374,19 @@ def migrate_bones(context, mt, mmd, pelvis_name, swap_lr):
                         if g.weight > 1e-6)
     wanted = set()
     for name in weighted:
-        bone = mmd.data.bones.get(name)
-        if bone is None or not bone.use_deform or _digit(bone) or is_finger_name(name):
+        bone = mmd.data.bones.get(folds.get(name, name))
+        if bone is None or not bone.use_deform or _digit(bone) or is_finger_name(bone.name):
             continue
         path = []
         while bone and bone.name not in body_names and bone.name not in mapped:
+            if bone.name in path:
+                raise ValueError(f"归并后的父子链存在循环：{name}")
             path.append(bone.name)
-            bone = bone.parent
+            bone = mmd.data.bones.get(parent_name(bone) or '')
         if bone is not None and not is_finger_name(bone.name):
             wanted.update(path)
-    if not wanted:
-        return 0
     basis = mt.matrix_world.inverted() @ mmd.matrix_world
-    records = [(bone.name, bone.parent.name, basis @ bone.head_local,
+    records = [(bone.name, parent_name(bone), basis @ bone.head_local,
                 basis @ bone.tail_local, basis.to_3x3() @ bone.matrix_local.col[2].xyz)
                for bone in mmd.data.bones if bone.name in wanted]
 
@@ -302,8 +402,12 @@ def migrate_bones(context, mt, mmd, pelvis_name, swap_lr):
             bone.use_connect = (bone.head - bone.parent.tail).length < 1e-6
             destinations[name] = mapped[name] = bone.name
 
-    _edit_arm(context, mt, copy)
+    if records:
+        _edit_arm(context, mt, copy)
+    destinations = {**body_names, **mapped}
+    mapped.update({name: destinations[owner] for name, owner in folds.items()
+                   if owner in destinations})
     mt[MMD_BONE_MAP] = mapped
     mt[MMD_BONE_SOURCE] = mmd
     context.view_layer.update()
-    return len(records)
+    return len(records), len(weighted & folds.keys())

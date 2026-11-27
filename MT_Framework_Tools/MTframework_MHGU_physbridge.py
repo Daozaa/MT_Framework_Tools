@@ -24,7 +24,7 @@ def _move_bone_records(mod, template, plans, *, removed=(), parent_overrides=Non
     modified = set(parent_overrides or {})
     before = {}
     for plan in plans:
-        idx, child = len(records), plan['child']
+        idx, child = len(records), plan.get('child')
         info = bytearray(INFO)
         info[0] = plan['id']
         info[2] = idx
@@ -35,9 +35,11 @@ def _move_bone_records(mod, template, plans, *, removed=(), parent_overrides=Non
                          *(center - value for center, value in zip(template['c'], plan['world'])))
         records.append((info, lmat, amat, plan['world']))
         parents[idx] = plan['parent']
-        parents[child] = idx
-        modified.update((idx, child))
-        before[child] = idx
+        modified.add(idx)
+        if child is not None:
+            parents[child] = idx
+            modified.add(child)
+            before[child] = idx
 
     order, done, visiting = [], set(), set()
 
@@ -56,7 +58,7 @@ def _move_bone_records(mod, template, plans, *, removed=(), parent_overrides=Non
         done.add(idx)
         order.append(idx)
 
-    for idx in range(n):
+    for idx in range(len(records)):
         if idx in removed:
             continue
         if idx in before:
@@ -189,12 +191,123 @@ def _check_removed_references(context, arm, ids, labels):
     if any(ids & {cap['a'], cap['b']} for cap in capsules):
         raise ValueError('CCL 胶囊仍引用待调整的骨，请先修正胶囊的 A/B 骨位')
     for obj in context.scene.objects:
-        if obj.type != 'MESH' or obj.find_armature() != arm:
+        if obj.type != 'MESH':
+            continue
+        linked = obj.find_armature()
+        if linked != arm and (linked is not None or not obj.select_get()):
             continue
         indices = {group.index for group in obj.vertex_groups if group.name in labels}
         if indices and any(group.group in indices and group.weight > 0
                            for vertex in obj.data.vertices for group in vertex.groups):
             raise ValueError(f'「{obj.name}」仍有权重指向待调整的连接骨或已删除的骨，请先转移权重')
+
+def sync_registered_edits(context, arm, mod, ctc):
+    from .MTframework_MHGU import get_bone_name_map, get_object_center_offset
+    from .MTframework_MHGU_bones import write_bone_section
+    from .MTframework_MHGU_physmat import rebuild_matrices
+
+    from .MTframework_MHGU_bones import bone_head_to_file_translation
+    from .MTframework_MHGU_physcustom import _custom_records
+
+    template = _parse(mod)
+    recorded = get_bone_name_map(context.scene, arm)
+    ids = {bone['id']: bone['slot'] for bone in template['bones']}
+    known = {int(bid): str(name) for bid, name in (arm.get('MT_PhysIdMap') or {}).items()}
+    if not known or not recorded:
+        return None
+    _, old_groups, old_nodes, _ = _split_ctc(ctc)
+    old_chains = [tuple(map(_node_id, row)) for row in _group_chains(old_groups, old_nodes)]
+    old_ids = {_node_id(node) for node in old_nodes}
+    if len(old_ids) != len(old_nodes) or len(set(known.values())) != len(known):
+        raise ValueError('登记的 CTC 或骨名存在重复，无法安全匹配')
+    restore = {}
+    for bid, name in known.items():
+        if bid in ids:
+            if name in recorded and recorded[name] != ids[bid]:
+                raise ValueError(f'登记的物理骨「{name}」与工程模板的骨位不一致，请恢复对应工程的模板')
+            recorded[name] = ids[bid]
+        elif bid in old_ids and PHYS_MIN <= bid < 255:
+            if name in arm.data.bones:
+                restore[name] = bid
+        elif name in arm.data.bones:
+            raise ValueError(f'登记的物理骨「{name}」缺少模板和 CTC 记录，请恢复对应工程的模板')
+    names = _custom_records(arm, template['n'], recorded)
+    for name in restore:
+        names.pop(name, None)
+    if len(names) != len(set(names.values())):
+        raise ValueError('同一模板骨位对应多个骨名')
+    removed = set(range(template['n'])) - set(names.values())
+    if any(template['bones'][slot]['id'] < PHYS_MIN for slot in removed):
+        raise ValueError('当前骨架缺少模板里的身体骨，请恢复对应工程的骨架')
+    unknown_ctc = old_ids - ids.keys() - known.keys()
+    if unknown_ctc:
+        raise ValueError('缺少 CTC 骨位记录，无法确认骨骼 ID：' + str(sorted(unknown_ctc)[:8]))
+    removed_ids = ({template['bones'][slot]['id'] for slot in removed}
+                   | (old_ids - ids.keys() - set(restore.values())))
+    if restore and template['n'] - len(removed) + len(restore) > 255:
+        raise ValueError('恢复已登记的物理链后超过 255 骨位')
+    for index, name in enumerate(restore, start=template['n']):
+        names[name] = index
+    parents, plans = {}, []
+    offset = get_object_center_offset(arm, context.scene)
+    for name, slot in names.items():
+        bone = arm.data.bones[name]
+        parent = bone.parent
+        if parent is not None and parent.name not in names:
+            raise ValueError(f'「{name}」的父骨「{parent.name}」未登记，请先登记新骨')
+        if slot >= template['n']:
+            if parent is None:
+                raise ValueError(f'「{name}」需要挂到已登记的父骨')
+            translation = bone_head_to_file_translation(
+                arm.matrix_world @ bone.head_local - offset, template['scale'])
+            world = tuple(center - value for center, value in zip(template['c'], translation))
+            plans.append(dict(id=restore[name], parent=names[parent.name], world=world))
+            continue
+        previous = template['bones'][slot]['parent']
+        if parent is None:
+            if previous < template['n'] and previous != slot:
+                raise ValueError(f'「{name}」需要挂到已登记的父骨')
+        elif previous != names[parent.name]:
+            parents[slot] = names[parent.name]
+    if not (removed_ids or parents or plans):
+        return None
+    if removed_ids:
+        removed_labels = {name for name, slot in recorded.items() if slot in removed}
+        removed_labels.update(known[bid] for bid in removed_ids if bid in known)
+        _check_removed_references(context, arm, removed_ids, removed_labels)
+
+    current = bytearray(mod)
+    live_existing = {name: slot for name, slot in names.items() if slot < template['n']}
+    write_bone_section(current, template['ptr'], template['n'], arm,
+                       name_map=live_existing, offset=offset, anchor=False)
+    new_mod, slots = _move_bone_records(current, _parse(current), plans, removed=removed,
+                                        parent_overrides=parents)
+    new_ctc = _trim_ctc(ctc, _parse(new_mod))
+    _, groups, nodes, _ = _split_ctc(new_ctc)
+    chains = [tuple(map(_node_id, row)) for row in _group_chains(groups, nodes)]
+    changed = {bid for row in chains if row not in old_chains for bid in row}
+    for slot in parents:
+        bid = template['bones'][slot]['id']
+        changed.update(next((row for row in chains if bid in row), ()))
+    new_bones = _parse(new_mod)['bones']
+    by_id = {new_bones[slots[slot]]['id']: name for name, slot in names.items()}
+    changed.update(restore.values())
+    protected = {_node_id(node) for node in nodes
+                 if struct.unpack_from('<f', node, 8)[0] == 0
+                 and struct.unpack_from('<f', node, 80)[0] == 0}
+    incomplete = [by_id[row[0]] for row in chains if len(row) == 1
+                  and row not in old_chains and row[0] not in protected]
+    if incomplete:
+        raise ValueError('融并后链只剩一个节点：' + '、'.join(incomplete[:8])
+                         + '。请保留第二个链节点，或将整条链的权重转移到身体骨')
+    if changed - protected:
+        new_ctc, _ = rebuild_matrices(arm, new_ctc, names=by_id, nodes=changed - protected)
+    problems = check_topology(new_mod, new_ctc)
+    if problems:
+        raise ValueError('融并后 CTC 检查失败：' + problems[0])
+    name_map = {name: slots[slot] for name, slot in names.items()}
+    id_map = {str(bid): name for bid, name in by_id.items() if bid in old_ids}
+    return new_mod, new_ctc, name_map, id_map, len(removed_ids), len(restore)
 
 def _plan_links(arm, template, groups, nodes, names, keep, restored, offset):
     from .MTframework_MHGU_bones import bone_head_to_file_translation

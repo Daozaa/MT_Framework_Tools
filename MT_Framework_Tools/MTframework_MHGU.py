@@ -153,46 +153,7 @@ def read_float16(f):
 
 def float_to_short(fValue):
     import struct as _struct
-
-    Src = _struct.unpack('<I', _struct.pack('<f', fValue))[0]
-
-    Sign = (Src >> 31) & 1
-    exponent = ((Src >> 23) & 0xFF) - 127 + 15
-    Mantissa = Src & 0x007FFFFF
-
-    if 0 <= exponent <= 30:
-        Result = (Sign << 15) | (exponent << 10) | ((Mantissa + 0x00001000) >> 13)
-    else:
-        if Src == 0:
-            Result = 0
-        else:
-            if exponent <= 0:
-                if exponent <= -10:
-                    Result = 0
-                else:
-                    Mantissa = (Mantissa | 0x00800000) >> (1 - exponent)
-                    if (Mantissa & 0x00001000):
-                        Mantissa = Mantissa + 0x00002000
-                        Result = (Sign << 15) | (Mantissa >> 13)
-                    else:
-                        Result = 0
-            else:
-                if exponent == 255 - 127 + 15:
-                    if Mantissa == 0:
-                        Result = (Sign << 15) | 0x7C00
-                    else:
-                        Result = (Sign << 15) | 0x7C00 | (Mantissa >> 13)
-                else:
-                    if (Mantissa & 0x00001000):
-                        Mantissa = Mantissa + 0x00002000
-                        if (Mantissa & 0x00800000):
-                            Mantissa = 0
-                            exponent = exponent + 1
-                    if exponent >= 30:
-                        Result = (Sign << 15) | 0x7C00
-                    else:
-                        Result = (Sign << 15) | (exponent << 10) | (Mantissa >> 13)
-    return Result
+    return _struct.unpack('<H', _struct.pack('<e', float(fValue)))[0]
 
 def read_fixed_string(f, fixed_len):
     s = b''

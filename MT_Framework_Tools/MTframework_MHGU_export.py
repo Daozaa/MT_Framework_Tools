@@ -1,4 +1,4 @@
-import bpy, os, struct
+import bpy, os, struct, copy
 from mathutils import Vector
 from io import BytesIO
 from .Mod import MODHeader, MeshHeaderStruct
@@ -10,6 +10,41 @@ from .MTframework_MHGU import (get_skin_weights, float_to_short,
 
 _SINGLE_BONE_FVF = {0xB0983013, 0xB0983014, 0xA8FAB018, 0xA8FAB019,
                     0x0CB6800E, 0x0CB68015, 0x0CB68016}
+
+_WEIGHTED_FVF = {0x14D40019, 0x14D40020, 0x14D40021, 0x14D40022,
+                 0x64593023, 0x64593025, 0xCBCF7027, 0x2F55C03D,
+                 0xBB424024, 0xBB424025}
+
+def _max_weight_influences(obj, bone_map):
+    if not bone_map:
+        return 0
+    maxn = 0
+    for v in obj.data.vertices:
+        n = len({bone_map[g.group] for g in v.groups
+                 if g.group in bone_map and g.weight > 1e-5})
+        if n > maxn:
+            maxn = n
+            if maxn >= 4:
+                break
+    return maxn
+
+def _pick_weighted_header(headers):
+    cands = [h for h in headers if int(getattr(h, 'fvfInfo', 0)) in _WEIGHTED_FVF]
+    if not cands:
+        return None
+    return max(cands, key=lambda h: (
+        1 if int(getattr(h, 'fvfInfo', 0)) == 0x14D40022 else 0,
+        1 if int(getattr(h, 'meshtype', 0)) == 0xEFFF else 0,
+        int(getattr(h, 'vertCount', 0)),
+    ))
+
+def _retarget_header(base, layout):
+    h = copy.copy(layout)
+    for attr in ('meshtype', 'MatId', 'lodLevel', 'vertFlag',
+                 'unk01', 'unk08', 'unk09'):
+        if hasattr(base, attr):
+            setattr(h, attr, getattr(base, attr))
+    return h
 
 def _bone_no_from_name(name):
     if not name or not name.startswith('b_'):
@@ -543,6 +578,7 @@ def export_mod_file(filepath, game_fix="mhgu", template_path=None, *, expect_atl
             except: pass
         return -1
     sm = {}
+    atlas_duplicates = []
     for o in sel:
         k = sn(o.name)
         if k < 0 or len(o.data.vertices) == 0:
@@ -553,6 +589,8 @@ def export_mod_file(filepath, game_fix="mhgu", template_path=None, *, expect_atl
         elif prev.name.endswith("_OLD") and not o.name.endswith("_OLD"):
 
             sm[k] = o
+        elif expect_atlas_uv and not o.name.endswith('_OLD') and 0 <= k < len(headers):
+            atlas_duplicates.append((k, o))
 
     _auto = [o for o in sel
              if sn(o.name) < 0 and len(o.data.vertices) > 0
@@ -574,6 +612,17 @@ def export_mod_file(filepath, game_fix="mhgu", template_path=None, *, expect_atl
                   % (_o.name, _k, _k + 1, _mt,
                      "" if _mt == 0xEFFF else
                      " —— 该槽是影子/低模件不会显示，要显示请勾选「所有分件都当可见件」"))
+
+    if atlas_duplicates:
+
+        for k, obj in sorted(atlas_duplicates, key=lambda item: (item[0], item[1].name)):
+            new_slot = max(len(headers), max(sm) + 1)
+            if new_slot > len(headers):
+
+                headers.extend([max(headers, key=lambda h: h.vertCount)] *
+                               (new_slot - len(headers)))
+            headers.append(headers[k])
+            sm[new_slot] = obj
 
     if not sm and sel:
         print('NOTE: 选中的网格都被跳过了（名字以 _OLD 结尾 / 没有顶点 / 没有分件槽可用）'
@@ -607,6 +656,28 @@ def export_mod_file(filepath, game_fix="mhgu", template_path=None, *, expect_atl
         vs = _tpl.vertStride; fvf = _tpl.fvfInfo
 
         md = obj.data; vc = len(md.vertices)
+
+        _arm_bm = _arm_of(obj)
+        _bm = _build_bone_map(obj, len(_arm_bm.data.bones) if _arm_bm else 0)
+        _maxinf = _max_weight_influences(obj, _bm)
+        if _maxinf > 1 and fvf in _SINGLE_BONE_FVF:
+            _alt = _pick_weighted_header(headers)
+            if _alt is None:
+                _msg = ('「%s」有 %d 根骨权重，但模板里没有多骨 FVF 分件，'
+                        '无法保留混合权重；请用一个带 0x14D40022 分件的 arc 作模板'
+                        % (obj.name, _maxinf))
+                if report:
+                    report({'ERROR'}, _msg)
+                raise ValueError(_msg)
+            _old_fvf = fvf
+            _tpl = _retarget_header(_tpl, _alt)
+            vs = _tpl.vertStride; fvf = _tpl.fvfInfo
+            _msg = ('「%s」有 %d 根骨权重 → 分件 %d 的单骨 FVF 0x%08X 已换成多骨 '
+                    'FVF 0x%08X（MatId=%d 保持）'
+                    % (obj.name, _maxinf, i, _old_fvf, fvf, int(_tpl.MatId)))
+            print('WARNING: ' + _msg)
+            if report:
+                report({'WARNING'}, _msg)
 
         _seam_split = False
         _split = list(range(vc))
@@ -720,8 +791,7 @@ def export_mod_file(filepath, game_fix="mhgu", template_path=None, *, expect_atl
             if ul and md.loops:
                 for loop in md.loops:
                     vum.setdefault(loop.vertex_index, Vector((ul[loop.index].uv.x, 1.0-ul[loop.index].uv.y)))
-            _arm_bm = _arm_of(obj)
-            bm = _build_bone_map(obj, len(_arm_bm.data.bones) if _arm_bm else 0)
+            bm = _bm
 
             _coff = get_object_center_offset(obj, bpy.context.scene)
             _mw = obj.matrix_world.copy()

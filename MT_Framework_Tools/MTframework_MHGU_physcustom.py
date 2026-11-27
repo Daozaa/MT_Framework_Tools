@@ -203,6 +203,16 @@ def _available_phys_ids(template):
 def _physical_budget(template, total=255):
     return min(len(_available_phys_ids(template)), total - template['n'])
 
+def pending_physics_budget(arm, template, limit=255):
+    known = _custom_records(arm, template['n'])
+    pending = [bone for bone in arm.data.bones if bone.name not in known]
+    if any(bone.parent is None for bone in pending):
+        raise ValueError('新物理骨必须有父骨')
+    parents = {bone.name: bone.parent.name for bone in pending}
+    chains = _split_chains(pending, parents)
+    singletons = sum(len(chain) == 1 for chain in chains)
+    return known, parents, chains, singletons, _physical_budget(template, limit)
+
 def plan_custom_bones(mod_bytes, arm_obj, offset, preset_key=DEFAULT_PRESET_KEY,
                       name_map=None, ctc_bytes=None, order=None,
                       auto_init=False):
@@ -442,10 +452,12 @@ def arm_physics_names(arm):
     named_ids = arm.get('MT_PhysIdMap') or {}
     registered = {str(name) for bid, name in named_ids.items()
                   if str(bid).isdigit() and int(bid) >= PHYS_MIN}
+    stored = arm.get('MT_BoneNameMap') if registered else {}
     out = []
     for b in arm.data.bones:
         m = _PHYS_NAME_RE.match(b.name)
-        if b.name in registered or (m and int(m.group(1)) >= PHYS_MIN):
+        if b.name in registered or (m and int(m.group(1)) >= PHYS_MIN
+                                    and b.name not in (stored or {})):
             out.append(b.name)
     return out
 
@@ -955,19 +967,16 @@ if bpy is not None:
             fused = 0
             try:
                 tpl_info = _parse(mod_bytes)
-                known = _custom_records(arm, tpl_info['n'])
-                pending = [bone for bone in arm.data.bones if bone.name not in known]
-                if not pending:
+                fuse = sc.MT_PhysFuseOverflow
+                limit = sc.MT_PhysFuseLimit if fuse else 255
+                known, parents, chains, reserve, capacity = pending_physics_budget(arm, tpl_info, limit)
+                if not parents:
                     self.report({'INFO'}, '当前骨骼都已登记。跨组链可直接使用「添加锁死连接骨」')
                     return {'FINISHED'}
-                if any(bone.parent is None for bone in pending):
-                    raise ValueError('新物理骨必须有父骨')
-                parents = {bone.name: bone.parent.name for bone in pending}
-                chains = _split_chains(pending, parents)
-                reserve = sum(len(chain) == 1 for chain in chains)
-                fuse = sc.MT_PhysFuseOverflow
-                capacity = _physical_budget(tpl_info, sc.MT_PhysFuseLimit if fuse else 255)
-                required = len(pending) + reserve
+                if len(chains) * 2 > capacity:
+                    raise ValueError(f'{len(chains)} 条链至少需 {len(chains) * 2} 个骨位，'
+                                     f'剩余 {capacity} 个。先减少平行链或把硬挂件归身体骨')
+                required = len(parents) + reserve
                 if required > capacity:
                     if not fuse:
                         raise ValueError('登记需要 %d 个骨位（含补链尾），只剩 %d 个。可开启超限对半融并'

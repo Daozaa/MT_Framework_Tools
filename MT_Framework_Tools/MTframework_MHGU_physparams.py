@@ -100,11 +100,12 @@ PHYS_PRESETS = {
     'soft_jiggle':     ("贴身·更软",   0.0, 0.250, 0.050, 0.15, 0.50, 100.0, 0.05, 0.90, 1.0, 1.0),
     'soft_jiggle_max': ("贴身·最软",   0.0, 0.100, 0.020, 0.10, 0.60, 100.0, 0.05, 1.40, 0.6, 1.0),
 
-    'auto_hair':       ("自动·头发",   0.0, 0.120, 0.020, 0.80, 0.80, 100.0, 0.10, 1.75, 1.0, 1.0),
+    'auto_hair':       ("头发·自然回正", 0.0, 0.235, 0.060, 0.26, 0.48, 100.0, 0.10, 1.05, 0.90, 1.0),
     'auto_sleeve':     ("自动·长袖",   0.0, 0.180, 0.015, 1.00, 0.80, 100.0, 0.10, 1.70, 1.0, 1.0),
     'auto_cloth':      ("自动·裙摆",   0.0, 0.180, 0.015, 1.00, 0.80, 100.0, 0.10, 1.57, 1.0, 1.0),
-    'auto_tail':       ("自动·尾巴",   0.0, 0.100, 0.030, 1.20, 0.90, 100.0, 0.10, 2.00, 0.8, 1.0),
-    'auto_ribbon':     ("自动·丝带",   0.0, 0.100, 0.030, 1.20, 0.90, 100.0, 0.10, 2.00, 0.8, 1.0),
+    'auto_tail':       ("尾巴·自然回正", 0.0, 0.260, 0.075, 0.22, 0.48, 100.0, 0.10, 1.30, 0.80, 1.0),
+    'auto_ribbon':     ("丝带·减拖",   0.0, 0.245, 0.085, 0.36, 0.34, 100.0, 0.10, 0.95, 0.72, 1.0),
+    'auto_fringe':     ("刘海·小幅",   0.0, 0.350, 0.100, 0.00, 0.08, 100.0, 0.10, 0.12, 0.16, 1.0),
     'auto_other':      ("自动·通用",   0.0, 0.160, 0.015, 1.00, 0.80, 100.0, 0.10, 1.60, 1.0, 1.0),
 }
 
@@ -133,7 +134,9 @@ def _region_key(names):
     if any(k in text for k in ('breast', 'bust', 'chest', '胸', '乳', '腹',
                                'belly', 'hip', '臀')):
         return 'body_soft'
-    if any(k in text for k in ('hair', 'ponytail', 'braid', '发', '刘海', '辫')):
+    if any(k in text for k in ('fringe', 'bangs', 'front_hair', 'fronthair', '刘海', '前发', '前髪')):
+        return 'fringe'
+    if any(k in text for k in ('hair', 'ponytail', 'braid', '发', '髪', '辫')):
         return 'hair'
     if any(k in text for k in ('sleeve', '袖')):
         return 'sleeve'
@@ -150,6 +153,7 @@ def _region_key(names):
 _REGION_INFO = {
     'body_soft': ('贴身', 'soft_body'),
     'hair': ('头发', 'auto_hair'),
+    'fringe': ('刘海', 'auto_fringe'),
     'sleeve': ('长袖', 'auto_sleeve'),
     'tail': ('尾巴', 'auto_tail'),
     'ribbon': ('丝带', 'auto_ribbon'),
@@ -172,7 +176,27 @@ def auto_chain_values(names, positions):
         length += sum((float(b[k]) - float(a[k])) ** 2 for k in range(3)) ** 0.5
     extent = max(0.0, min(1.0, (length - 20.0) / 120.0))
 
-    if region == 'body_soft':
+    n = max(1, len(names))
+    complexity = max(extent, min(1.0, max(0, n - 3) / 5.0))
+    if region == 'fringe':
+
+        angle *= 1.0 - 0.20 * complexity
+    elif region in ('ribbon', 'cloth', 'sleeve'):
+
+        damp = max(damp, 0.20 + 0.12 * complexity)
+        spring = max(spring, 0.065 + 0.045 * complexity)
+        wind = min(wind, 0.45) * (1.0 - 0.30 * complexity)
+        trans = min(trans, 0.42) * (1.0 - 0.40 * complexity)
+        angle = min(angle, 1.10) * (1.0 - 0.25 * complexity)
+        mass *= 1.0 - 0.20 * complexity
+    elif region in ('hair', 'tail'):
+
+        damp += 0.12 * complexity
+        spring += 0.05 * complexity
+        wind *= 1.0 - 0.60 * complexity
+        trans *= 1.0 - 0.37 * complexity
+        angle *= 1.0 - 0.28 * complexity
+    elif region == 'body_soft':
 
         damp = max(0.25, damp - 0.10 * extent)
         trans = trans * (1.0 + 0.15 * extent)
@@ -185,7 +209,6 @@ def auto_chain_values(names, positions):
         angle = min(2.20, angle + 0.35 * extent)
         mass = mass * (1.0 + 0.25 * extent)
 
-    n = max(1, len(names))
     values = []
     for i in range(n):
         t = (i / float(n - 1)) if n > 1 else 0.0

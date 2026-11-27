@@ -84,6 +84,18 @@ def bind_atlas(entries, texture):
             raise ValueError(f'材质「{name}」没有可识别的基础贴图槽')
         references.update(base)
 
+    canonical = _tex_key(model['name'] + '_BM')
+    local = [entry for entry in entries if entry['body'].startswith(TEX_MAGIC)
+             and _tex_key(entry['name']) == canonical]
+    if texture_paths.count(canonical) == 1 and len(local) == 1:
+        slot = texture_paths.index(canonical) + 1
+        for pos in references:
+            struct.pack_into('<I', mrl, pos, slot)
+        _replace_body(local[0], texture)
+        if any(value != slot for value in references.values()):
+            _replace_body(material, bytes(mrl))
+        return local[0]['name']
+
     original_slots = set(references.values())
     if len(original_slots) == 1 and 0 not in original_slots:
         key = texture_paths[next(iter(original_slots)) - 1]

@@ -128,7 +128,7 @@ def set_all_identity(ctc):
         b[o + 4] = 1
     return bytes(b), changed
 
-def rebuild_matrices(arm, ctc, rot_axis=(1.0, 0.0, 0.0)):
+def rebuild_matrices(arm, ctc, rot_axis=(1.0, 0.0, 0.0), *, names=None, nodes=None):
     b = bytearray(ctc)
     n_g = struct.unpack_from('<I', b, 0x10)[0]
     n_c = struct.unpack_from('<I', b, 0x14)[0]
@@ -144,6 +144,8 @@ def rebuild_matrices(arm, ctc, rot_axis=(1.0, 0.0, 0.0)):
 
     def _name(jid):
         nm = 'b_%d' % jid
+        if names is not None:
+            return names.get(jid, nm)
         try:
             _mp = arm.get('MT_PhysIdMap')
             if _mp:
@@ -155,6 +157,13 @@ def rebuild_matrices(arm, ctc, rot_axis=(1.0, 0.0, 0.0)):
     for k in range(n_c):
         o = off + k * 96
         jid = b[o]
+        if nodes is not None and jid not in nodes:
+            continue
+
+        if (b[o + 2] & 1 and b[o + 3] == 1
+                and struct.unpack_from('<f', b, o + 8)[0] == 0.0
+                and struct.unpack_from('<f', b, o + 80)[0] == 0.0):
+            continue
         name = _name(jid)
 
         if k not in group_starts:
